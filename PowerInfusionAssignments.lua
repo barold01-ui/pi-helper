@@ -559,11 +559,16 @@ function PI:CreateOptionsWindow()
     close:SetPoint("TOPRIGHT", o, "TOPRIGHT", -2, -2)
     close:SetScript("OnClick", function() o:Hide() end)
 
+    -- Heading above tabs
+    local heading = o:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    heading:SetPoint("TOPLEFT", o, "TOPLEFT", 12, -10)
+    heading:SetText("Power Infusion Assignment Helper")
+
     -- Tab buttons
     local function CreateTabButton(parent, id, text, xOffset)
         local tab = CreateFrame("Button", "PIOptionsTab"..id, parent)
         tab:SetSize(100, 28)
-        tab:SetPoint("TOPLEFT", parent, "TOPLEFT", xOffset, -4)
+        tab:SetPoint("TOPLEFT", parent, "TOPLEFT", xOffset, -28)
         
         tab.text = tab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         tab.text:SetPoint("CENTER", tab, "CENTER", 0, 0)
@@ -588,16 +593,16 @@ function PI:CreateOptionsWindow()
         return tab
     end
 
-    local tab1 = CreateTabButton(o, 1, "PI Options", 8)
+    local tab1 = CreateTabButton(o, 1, "Configuration", 8)
     local tab2 = CreateTabButton(o, 2, "FAQ", 112)
     
     -- Tab content containers
     local tab1Content = CreateFrame("Frame", "PIOptionsTab1Content", o)
-    tab1Content:SetPoint("TOPLEFT", o, "TOPLEFT", 0, -32)
+    tab1Content:SetPoint("TOPLEFT", o, "TOPLEFT", 0, -56)
     tab1Content:SetPoint("BOTTOMRIGHT", o, "BOTTOMRIGHT", 0, 0)
     
     local tab2Content = CreateFrame("Frame", "PIOptionsTab2Content", o)
-    tab2Content:SetPoint("TOPLEFT", o, "TOPLEFT", 0, -32)
+    tab2Content:SetPoint("TOPLEFT", o, "TOPLEFT", 0, -56)
     tab2Content:SetPoint("BOTTOMRIGHT", o, "BOTTOMRIGHT", 0, 0)
     tab2Content:Hide()
     
@@ -608,7 +613,7 @@ function PI:CreateOptionsWindow()
     faqText:SetJustifyH("LEFT")
     faqText:SetWordWrap(true)
     faqText:SetSpacing(2)
-    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\nThis addon works in raid groups only. It lets your priests coordinate their PI assignments, by showing each priest's PI target in a moveable window.\n\nIf more than 1 priest has PI set to the same person, it will show a warning.\n\nIt runs automatically, as long as your PI target is configured in a macro!\n\nAlso allows any raid member to check PI assignments with the !pi command in instance chat.\n\n|cFFFFD100Q: How do I set up the addon?|r\nUse the /pi command to open configuration. Follow the setup instructions in the \"PI Options\" tab. Each priest in your group needs to have the addon running.\n\n|cFFFFD100Q: How do I macro Power Infusion?|r\nI suggest checking out the Advanced Power Infusion macro in the Shadow Priest Icy Veins guide.")
+    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\nThis addon works in raid groups only. It lets your priests coordinate their PI assignments, by showing each priest's PI target in a moveable window.\n\nIf more than 1 priest has PI set to the same person, it will show a warning.\n\nAlso allows any raid member to check PI assignments with the !pi command in instance chat.\n\n|cFFFFD100Q: How do I set up the addon?|r\nUse the /pi command to open configuration. Follow the setup instructions in the \"PI Options\" tab. Each priest in your group needs to have the addon running.\n\n|cFFFFD100Q: How do I macro Power Infusion?|r\nI suggest checking out the Advanced Power Infusion macro in the Shadow Priest Icy Veins guide.")
     
     local function SelectTab(tabNum)
         if tabNum == 1 then
@@ -653,12 +658,14 @@ function PI:CreateOptionsWindow()
     local function UpdateModeVisibility()
         local mode = PowerInfusionAssignmentsDB.piMode or 1
         if mode == 1 then
+            o.macroHelpText:Show()
             o.macroLabel:Show()
             o.edit:Show()
             o.mouseoverMacroLabel:Hide()
             o.mouseoverMacroScroll:Hide()
             o.copyMacroButton:Hide()
         else
+            o.macroHelpText:Hide()
             o.macroLabel:Hide()
             o.edit:Hide()
             o.mouseoverMacroLabel:Show()
@@ -674,6 +681,7 @@ function PI:CreateOptionsWindow()
         PowerInfusionAssignmentsDB.piMode = arg1
         UIDropDownMenu_SetText(modeDropdown, PI_MODE_OPTIONS[arg1])
         UpdateModeVisibility()
+        o:UpdateHintVisibility()
     end
 
     local function ModeDropdown_Initialize(self, level)
@@ -692,13 +700,24 @@ function PI:CreateOptionsWindow()
     UIDropDownMenu_SetText(modeDropdown, PI_MODE_OPTIONS[PowerInfusionAssignmentsDB.piMode or 1])
 
     -- Macro name input (only visible in macro mode)
+    local macroHintText = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    macroHintText:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -40)
+    macroHintText:SetTextColor(0.2, 1, 0.2, 1)
+    macroHintText:SetText("Enter your macro name to get started")
+
+    local macroHelpText = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    macroHelpText:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -55)
+    macroHelpText:SetPoint("RIGHT", tab1Content, "RIGHT", -12, 0)
+    macroHelpText:SetJustifyH("LEFT")
+    macroHelpText:SetText("Your macro should contain a reference to your PI target in the form of target=yourtarget or @yourtarget")
+
     local macroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    macroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -40)
+    macroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -85)
     macroLabel:SetText("What's the name of your PI macro?")
 
     local edit = CreateFrame("EditBox", "PI_MacroNameEditBox", tab1Content, "InputBoxTemplate")
     edit:SetSize(120, 24)
-    edit:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 202, -34)
+    edit:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 202, -79)
     edit:SetAutoFocus(false)
     edit:SetText(PowerInfusionAssignmentsDB.macroName or "")
     
@@ -723,6 +742,7 @@ function PI:CreateOptionsWindow()
     edit:SetScript("OnTextChanged", function(self, userInput)
         if userInput then
             PowerInfusionAssignmentsDB.macroName = self:GetText() or ""
+            o:UpdateHintVisibility()
         end
     end)
     edit:SetScript("OnEnterPressed", function(self)
@@ -855,14 +875,30 @@ function PI:CreateOptionsWindow()
     testModeLabel:SetPoint("LEFT", testModeCheck, "RIGHT", 2, 0)
     testModeLabel:SetText("Test mode (show fake data)")
 
+    o.macroHintText = macroHintText
+    o.macroHelpText = macroHelpText
     o.macroLabel = macroLabel
     o.edit = edit
     o.errorText = errorText
     o.modeDropdown = modeDropdown
+    
+    -- Function to update hint visibility based on mode and macro name
+    local function UpdateHintVisibility()
+        local mode = PowerInfusionAssignmentsDB.piMode or 1
+        local macroName = PowerInfusionAssignmentsDB.macroName or ""
+        if mode == 1 and macroName == "" then
+            o.macroHintText:Show()
+        else
+            o.macroHintText:Hide()
+        end
+    end
+    o.UpdateHintVisibility = UpdateHintVisibility
+    
     PI.options = o
 
     -- Initialize visibility based on current mode
     UpdateModeVisibility()
+    UpdateHintVisibility()
 end
 
 SLASH_POWERINFUSION1 = "/pi"
