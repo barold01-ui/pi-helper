@@ -1,0 +1,28 @@
+# Changelog
+
+All notable changes to Power Infusion Assignment Helper will be documented in this file.
+
+## [1.1.0] - 2026-02-02
+
+### Added
+- Added "Power Infusion Assignment Helper" heading above the options panel tabs
+- Added help text in Mode 1 explaining macro target format (target=yourtarget or @yourtarget)
+- Added green hint text "Enter your macro name to get started" when no macro name is configured
+
+### Changed
+- Renamed "PI Options" tab to "Configuration"
+
+---
+
+## [1.0.0] - Initial Release
+
+### Features
+- Coordinate PI assignments between priests in raid groups
+- Automatic macro scanning to detect PI targets (Mode 1)
+- Manual mouseover target selection (Mode 2)
+- Visual warning when multiple priests have the same PI target
+- Optional whisper notifications to PI targets (guild members only)
+- !pi command in raid/instance chat to report all PI assignments
+- Moveable assignment display frame
+- Hide in combat option
+- Test mode for previewing the addon outside of raids
