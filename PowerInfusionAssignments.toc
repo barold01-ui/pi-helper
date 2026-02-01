@@ -1,0 +1,7 @@
+## Interface: 120000
+## Title: PowerInfusionAssignments
+## Notes: Track Power Infusion assignments from a user-specified macro
+## Author: GitHub Copilot
+## Version: 1.0
+## SavedVariables: PowerInfusionAssignmentsDB
+PowerInfusionAssignments.lua
