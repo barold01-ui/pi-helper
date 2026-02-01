@@ -2,6 +2,6 @@
 ## Title: PowerInfusionAssignments
 ## Notes: Track Power Infusion assignments from a user-specified macro
 ## Author: aname43
-## Version: 1.2.1
+## Version: 1.2.2
 ## SavedVariables: PowerInfusionAssignmentsDB
 PowerInfusionAssignments.lua
