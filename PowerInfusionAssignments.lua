@@ -57,12 +57,11 @@ function PI:BroadcastAssignment()
     local player = PI:GetPlayerName()
     local target = PowerInfusionAssignmentsDB.assignments[player]
     if not target or target == "" then return end
+    if not IsInRaid() then return end
 
     local payload = player..":"..target
-    local priests = PI:GetGroupPriests()
-    for _, priestName in ipairs(priests) do
-        C_ChatInfo.SendAddonMessage(PI_MSG_PREFIX, payload, "WHISPER", priestName)
-    end
+    -- Use RAID channel for more reliable communication in instances
+    C_ChatInfo.SendAddonMessage(PI_MSG_PREFIX, payload, "RAID")
 end
 
 function PI:OnAddonMessage(prefix, message, channel, sender)
