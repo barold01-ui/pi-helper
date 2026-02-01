@@ -1,0 +1,6 @@
+package-as: PowerInfusionAssignments
+
+ignore:
+  - README.md
+  - .git
+  - .gitignore
