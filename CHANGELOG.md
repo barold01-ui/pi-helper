@@ -2,6 +2,14 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.2.3]
+
+### Added
+- added some example macros
+
+### Changed
+- updated FAQ
+
 ## [1.2.2] - 2026-02-02
 
 - update curseforge

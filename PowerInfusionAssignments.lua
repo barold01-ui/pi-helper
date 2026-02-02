@@ -540,7 +540,7 @@ end
 function PI:CreateOptionsWindow()
     if PI.options then return end
     local o = CreateFrame("Frame", "PIOptionsWindow", UIParent, "BackdropTemplate")
-    o:SetSize(400, 330)
+    o:SetSize(400, 350)
     o:SetScale(1.5)
     o:SetFrameStrata("DIALOG")
     o:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -612,7 +612,7 @@ function PI:CreateOptionsWindow()
     faqText:SetJustifyH("LEFT")
     faqText:SetWordWrap(true)
     faqText:SetSpacing(2)
-    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\nThis addon works in raid groups only. It lets your priests coordinate their PI assignments, by showing each priest's PI target in a moveable window.\n\nIf more than 1 priest has PI set to the same person, it will show a warning.\n\nAlso allows any raid member to check PI assignments with the !pi command in instance chat.\n\n|cFFFFD100Q: How do I set up the addon?|r\nUse the /pi command to open configuration. Follow the setup instructions in the \"PI Options\" tab. Each priest in your group needs to have the addon running.\n\n|cFFFFD100Q: How do I macro Power Infusion?|r\nI suggest checking out the Advanced Power Infusion macro in the Shadow Priest Icy Veins guide.")
+    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- lets your priests coordinate PI targets in a moveable window\n- lets your raid team run !pi command to check who PI is set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon for things to work optimally.")
     
     local function SelectTab(tabNum)
         if tabNum == 1 then
@@ -657,16 +657,22 @@ function PI:CreateOptionsWindow()
     local function UpdateModeVisibility()
         local mode = PowerInfusionAssignmentsDB.piMode or 1
         if mode == 1 then
-            o.macroHelpText:Show()
+            o.macroHintText:Show()
             o.macroLabel:Show()
             o.edit:Show()
+            o.exampleMacroLabel:Show()
+            o.exampleMacroScroll:Show()
+            o.exampleCopyMacroButton:Show()
             o.mouseoverMacroLabel:Hide()
             o.mouseoverMacroScroll:Hide()
             o.copyMacroButton:Hide()
         else
-            o.macroHelpText:Hide()
+            o.macroHintText:Hide()
             o.macroLabel:Hide()
             o.edit:Hide()
+            o.exampleMacroLabel:Hide()
+            o.exampleMacroScroll:Hide()
+            o.exampleCopyMacroButton:Hide()
             o.mouseoverMacroLabel:Show()
             o.mouseoverMacroScroll:Show()
             o.copyMacroButton:Show()
@@ -704,21 +710,60 @@ function PI:CreateOptionsWindow()
     macroHintText:SetTextColor(0.2, 1, 0.2, 1)
     macroHintText:SetText("Enter your macro name to get started")
 
-    local macroHelpText = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    macroHelpText:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -55)
-    macroHelpText:SetPoint("RIGHT", tab1Content, "RIGHT", -12, 0)
-    macroHelpText:SetJustifyH("LEFT")
-    macroHelpText:SetText("Your macro should contain a reference to your PI target in the form of target=yourtarget or @yourtarget")
-
     local macroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    macroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -85)
+    macroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -55)
     macroLabel:SetText("What's the name of your PI macro?")
 
     local edit = CreateFrame("EditBox", "PI_MacroNameEditBox", tab1Content, "InputBoxTemplate")
     edit:SetSize(120, 24)
-    edit:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 202, -79)
+    edit:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 202, -49)
     edit:SetAutoFocus(false)
     edit:SetText(PowerInfusionAssignmentsDB.macroName or "")
+    
+    -- Example macro section (only visible in macro mode)
+    local exampleMacroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    exampleMacroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -90)
+    exampleMacroLabel:SetText("Example macro")
+
+    local exampleMacroScroll = CreateFrame("ScrollFrame", "PI_ExampleMacroScroll", tab1Content, "UIPanelScrollFrameTemplate,BackdropTemplate")
+    exampleMacroScroll:SetSize(340, 60)
+    exampleMacroScroll:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -100)
+    exampleMacroScroll:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
+    exampleMacroScroll:SetBackdropColor(0, 0, 0, 1)
+    exampleMacroScroll:SetBackdropBorderColor(1, 0.82, 0, 1)
+
+    local exampleMacroEdit = CreateFrame("EditBox", "PI_ExampleMacroEditBox", exampleMacroScroll)
+    exampleMacroEdit:SetMultiLine(true)
+    exampleMacroEdit:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+    exampleMacroEdit:SetTextColor(0, 1, 0, 1)
+    exampleMacroEdit:SetSize(300, 50)
+    exampleMacroEdit:SetAutoFocus(false)
+    exampleMacroEdit:EnableMouse(true)
+    exampleMacroEdit:EnableKeyboard(true)
+    exampleMacroEdit:SetText("/use [@mouseover,nodead,help]Power Infusion;[@YOUR_PI_TARGET_HERE,exists,nodead]Power Infusion;[@player]Power Infusion")
+    exampleMacroEdit:SetTextInsets(8, 8, 8, 8)
+    exampleMacroEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    exampleMacroEdit:SetScript("OnKeyDown", function(self, key)
+        -- Allow Ctrl+C and Ctrl+A, block everything else
+        if IsControlKeyDown() and (key == "C" or key == "A") then
+            return
+        end
+        self:SetPropagateKeyboardInput(false)
+    end)
+    exampleMacroEdit:SetScript("OnChar", function(self) end)
+    exampleMacroEdit:SetScript("OnTextChanged", function(self)
+        self:SetText("/use [@mouseover,nodead,help]Power Infusion;[@YOUR_PI_TARGET_HERE,exists,nodead]Power Infusion;[@player]Power Infusion")
+    end)
+    exampleMacroScroll:SetScrollChild(exampleMacroEdit)
+
+    local exampleCopyMacroButton = CreateFrame("Button", nil, tab1Content, "UIPanelButtonTemplate")
+    exampleCopyMacroButton:SetSize(200, 22)
+    exampleCopyMacroButton:SetPoint("TOPLEFT", exampleMacroScroll, "BOTTOMLEFT", 0, -9)
+    exampleCopyMacroButton:SetText("Select All (Ctrl+C to copy)")
+    exampleCopyMacroButton:SetScript("OnClick", function()
+        exampleMacroEdit:SetFocus()
+        exampleMacroEdit:HighlightText(0)
+    end)
     
     -- Save and validate macro name when text changes
     local function ValidateMacroName()
@@ -840,7 +885,7 @@ function PI:CreateOptionsWindow()
 
     local enableWhispersLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     enableWhispersLabel:SetPoint("LEFT", enableWhispersCheck, "RIGHT", 2, 0)
-    enableWhispersLabel:SetText("Enable whispers")
+    enableWhispersLabel:SetText("Enable whispers (guild only)")
 
     -- Info icon for whispers
     local whispersInfoIcon = CreateFrame("Frame", nil, tab1Content)
@@ -875,9 +920,12 @@ function PI:CreateOptionsWindow()
     testModeLabel:SetText("Test mode (show fake data)")
 
     o.macroHintText = macroHintText
-    o.macroHelpText = macroHelpText
     o.macroLabel = macroLabel
     o.edit = edit
+    o.exampleMacroLabel = exampleMacroLabel
+    o.exampleMacroScroll = exampleMacroScroll
+    o.exampleMacroEdit = exampleMacroEdit
+    o.exampleCopyMacroButton = exampleCopyMacroButton
     o.errorText = errorText
     o.modeDropdown = modeDropdown
     
