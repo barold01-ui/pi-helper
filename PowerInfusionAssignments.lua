@@ -430,33 +430,32 @@ function PI:CreateAssignmentFrame()
     text:SetText("")
     f.text = text
 
-    -- Warning icons for duplicate targets (left and right)
-    local warningIconLeft = f:CreateTexture(nil, "OVERLAY")
-    warningIconLeft:SetSize(96, 96)
-    warningIconLeft:SetPoint("RIGHT", f, "LEFT", -4, 0)
-    warningIconLeft:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
-    warningIconLeft:Hide()
-    f.warningIconLeft = warningIconLeft
+    local errorText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    errorText:SetPoint("TOPLEFT", text, "BOTTOMLEFT", 0, -5)
+    errorText:SetJustifyH("LEFT")
+    errorText:SetTextColor(1, 0, 0)
+    errorText:SetText("")
+    f.errorText = errorText
 
-    local warningIconRight = f:CreateTexture(nil, "OVERLAY")
-    warningIconRight:SetSize(96, 96)
-    warningIconRight:SetPoint("LEFT", f, "RIGHT", 4, 0)
-    warningIconRight:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
-    warningIconRight:Hide()
-    f.warningIconRight = warningIconRight
+    -- Warning icon for issues (top)
+    local warningIconTop = f:CreateTexture(nil, "OVERLAY")
+    warningIconTop:SetSize(80, 80)
+    warningIconTop:SetPoint("BOTTOM", f, "TOP", 0, -15)
+    warningIconTop:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+    warningIconTop:Hide()
+    f.warningIconTop = warningIconTop
 
     -- Flash animation state
     f.flashElapsed = 0
     f.flashVisible = true
     f:SetScript("OnUpdate", function(self, elapsed)
-        if not self.warningIconLeft:IsShown() then return end
+        if not self.warningIconTop:IsShown() then return end
         self.flashElapsed = self.flashElapsed + elapsed
         if self.flashElapsed >= 0.5 then
             self.flashElapsed = 0
             self.flashVisible = not self.flashVisible
             local alpha = self.flashVisible and 1 or 0.2
-            self.warningIconLeft:SetAlpha(alpha)
-            self.warningIconRight:SetAlpha(alpha)
+            self.warningIconTop:SetAlpha(alpha)
         end
     end)
 
@@ -480,15 +479,54 @@ function PI:CheckForDuplicateTargets()
     return false, nil
 end
 
+function PI:GetRoleForName(name)
+    if not name or name == "" then return nil end
+    -- Check player
+    if UnitName("player") == name then
+        return UnitGroupRolesAssigned("player")
+    end
+    -- Check raid
+    if IsInRaid() then
+        local num = GetNumGroupMembers()
+        for i = 1, num do
+            local unit = "raid"..i
+            if UnitExists(unit) then
+                local uname = UnitName(unit)
+                if uname == name then
+                    return UnitGroupRolesAssigned(unit)
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function PI:CheckForRoleWarnings()
+    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
+        if target and target ~= "" then
+            local role = PI:GetRoleForName(target)
+            if role == "HEALER" or role == "TANK" then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 function PI:ResizeAssignmentFrameToText()
     if not PI.frame or not PI.frame.text then return end
     local textWidth = PI.frame.text:GetStringWidth() or 0
     local textHeight = PI.frame.text:GetStringHeight() or 0
+    local errorWidth = PI.frame.errorText:GetStringWidth() or 0
+    local errorHeight = PI.frame.errorText:GetStringHeight() or 0
+    local totalWidth = math.max(textWidth, errorWidth)
+    local totalHeight = textHeight + errorHeight + 5  -- 5 for space
     local minWidth = PI.frame.minWidth or 220
     local minHeight = PI.frame.minHeight or 40
     local padX = PI.frame.padX or 28
     local padY = PI.frame.padY or 22
-    PI.frame:SetSize(math.max(minWidth, textWidth + padX), math.max(minHeight, textHeight + padY))
+    local extraPadY = (PI.frame.errorText:GetText() ~= "") and 10 or 0
+    PI.frame:SetSize(math.max(minWidth, totalWidth + padX), math.max(minHeight, totalHeight + padY + extraPadY))
 end
 
 function PI:UpdateAssignmentFrame()
@@ -520,21 +558,29 @@ function PI:UpdateAssignmentFrame()
         end
     end
     
+    -- Check for duplicate targets and role warnings
+    local hasDuplicates, duplicateTarget = PI:CheckForDuplicateTargets()
+    local hasRoleWarning = PI:CheckForRoleWarnings()
+    local errorLines = {}
+    if hasDuplicates then
+        errorLines[#errorLines + 1] = "Duplicate PI targets!"
+    end
+    if hasRoleWarning then
+        errorLines[#errorLines + 1] = "PI assigned to HEALER or TANK!"
+    end
+    
     PI.frame.text:SetText(table.concat(reuseLines, "\n"))
+    PI.frame.errorText:SetText(table.concat(errorLines, "\n"))
     PI:ResizeAssignmentFrameToText()
     
-    -- Check for duplicate targets and show/hide warning icons
-    local hasDuplicates, duplicateTarget = PI:CheckForDuplicateTargets()
-    if hasDuplicates then
-        PI.frame.warningIconLeft:Show()
-        PI.frame.warningIconRight:Show()
+    -- Show/hide warning icon
+    if hasDuplicates or hasRoleWarning then
+        PI.frame.warningIconTop:Show()
         PI.frame.flashElapsed = 0
         PI.frame.flashVisible = true
-        PI.frame.warningIconLeft:SetAlpha(1)
-        PI.frame.warningIconRight:SetAlpha(1)
+        PI.frame.warningIconTop:SetAlpha(1)
     else
-        PI.frame.warningIconLeft:Hide()
-        PI.frame.warningIconRight:Hide()
+        PI.frame.warningIconTop:Hide()
     end
 end
 
@@ -613,7 +659,7 @@ function PI:CreateOptionsWindow()
     faqText:SetJustifyH("LEFT")
     faqText:SetWordWrap(true)
     faqText:SetSpacing(2)
-    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon for things to work optimally.")
+    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon")
     
     local function SelectTab(tabNum)
         if tabNum == 1 then
