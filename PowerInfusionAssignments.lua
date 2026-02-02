@@ -162,6 +162,7 @@ function PI:InitDB()
     PowerInfusionAssignmentsDB.testMode = false  -- Always reset test mode on login
     if PowerInfusionAssignmentsDB.hideInCombat == nil then PowerInfusionAssignmentsDB.hideInCombat = true end
     if PowerInfusionAssignmentsDB.enableWhispers == nil then PowerInfusionAssignmentsDB.enableWhispers = true end
+    if PowerInfusionAssignmentsDB.firstLoginMessageShown == nil then PowerInfusionAssignmentsDB.firstLoginMessageShown = false end
 end
 
 -- Fake test data for test mode
@@ -612,7 +613,7 @@ function PI:CreateOptionsWindow()
     faqText:SetJustifyH("LEFT")
     faqText:SetWordWrap(true)
     faqText:SetSpacing(2)
-    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- lets your priests coordinate PI targets in a moveable window\n- lets your raid team run !pi command to check who PI is set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon for things to work optimally.")
+    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon for things to work optimally.")
     
     local function SelectTab(tabNum)
         if tabNum == 1 then
@@ -723,7 +724,7 @@ function PI:CreateOptionsWindow()
     -- Example macro section (only visible in macro mode)
     local exampleMacroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     exampleMacroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -90)
-    exampleMacroLabel:SetText("Example macro")
+    exampleMacroLabel:SetText("Example macro (if you need to create one)")
 
     local exampleMacroScroll = CreateFrame("ScrollFrame", "PI_ExampleMacroScroll", tab1Content, "UIPanelScrollFrameTemplate,BackdropTemplate")
     exampleMacroScroll:SetSize(340, 60)
@@ -779,7 +780,7 @@ function PI:CreateOptionsWindow()
         if not idx then
             PI:SetError("Macro not found: " .. macroName)
         else
-            PI:SetSuccess("Macro found: " .. macroName .. "\nYou're all set!")
+            PI:SetSuccess("Found macro: " .. macroName .. "")
         end
     end
     
@@ -1082,6 +1083,10 @@ f:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         C_ChatInfo.RegisterAddonMessagePrefix(PI_MSG_PREFIX)
         PI:InitDB()
+        if not PowerInfusionAssignmentsDB.firstLoginMessageShown then
+            Print("To configure Power Infusion Assignment Helper, type /pi")
+            PowerInfusionAssignmentsDB.firstLoginMessageShown = true
+        end
         PI:RefreshClassColorCache()
         PI:CreateAssignmentFrame()
         PI:CreateOptionsWindow()
