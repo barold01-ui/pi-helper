@@ -2,6 +2,10 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.2.5]
+
+- Updated error handling
+
 ## [1.2.4]
 
 - minor cleanup
