@@ -186,6 +186,7 @@ local TEST_CLASS_COLORS = {
 function PI:SetTestMode(enabled)
     PowerInfusionAssignmentsDB.testMode = enabled
     if enabled then
+        wipe(PowerInfusionAssignmentsDB.assignments)
         -- Populate fake data
         local myName = PI:GetPlayerName()
         PowerInfusionAssignmentsDB.assignments[myName] = "TestTarget"
@@ -197,15 +198,7 @@ function PI:SetTestMode(enabled)
             classColorCache[name] = color
         end
     else
-        -- Clear fake data
-        local myName = PI:GetPlayerName()
-        for priest, _ in pairs(TEST_ASSIGNMENTS) do
-            PowerInfusionAssignmentsDB.assignments[priest] = nil
-        end
-        -- Keep player's real assignment if any, or clear test target
-        if PowerInfusionAssignmentsDB.assignments[myName] == "TestTarget" then
-            PowerInfusionAssignmentsDB.assignments[myName] = nil
-        end
+        wipe(PowerInfusionAssignmentsDB.assignments)
         -- Remove fake class colors from cache
         for name, _ in pairs(TEST_CLASS_COLORS) do
             classColorCache[name] = nil
@@ -398,7 +391,7 @@ function PI:CreateAssignmentFrame()
     f.minWidth = 220
     f.minHeight = 40
     f.padX = 28
-    f.padY = 22
+    f.padY = 0
     f:SetSize(f.minWidth, f.minHeight)
     local pos = PowerInfusionAssignmentsDB and PowerInfusionAssignmentsDB.framePos
     if pos and pos.point and pos.x and pos.y then
@@ -425,7 +418,7 @@ function PI:CreateAssignmentFrame()
     f:SetBackdropColor(0,0,0,0.6)
 
     local text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    text:SetPoint("LEFT", f, "LEFT", 10, 0)
+    text:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -10)
     text:SetJustifyH("LEFT")
     text:SetText("")
     f.text = text
@@ -524,8 +517,8 @@ function PI:ResizeAssignmentFrameToText()
     local minWidth = PI.frame.minWidth or 220
     local minHeight = PI.frame.minHeight or 40
     local padX = PI.frame.padX or 28
-    local padY = PI.frame.padY or 22
-    local extraPadY = (PI.frame.errorText:GetText() ~= "") and 10 or 0
+    local padY = PI.frame.padY or 0
+    local extraPadY = (PI.frame.errorText:GetText() ~= "") and 20 or 0
     PI.frame:SetSize(math.max(minWidth, totalWidth + padX), math.max(minHeight, totalHeight + padY + extraPadY))
 end
 
@@ -946,7 +939,7 @@ function PI:CreateOptionsWindow()
     whispersInfoIcon:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:AddLine("Enable Whispers", 1, 1, 1)
-        GameTooltip:AddLine("When you change your PI target, send them a whisper to let them know! Only works for guild members.", nil, nil, nil, true)
+        GameTooltip:AddLine("When you change your PI target, notify old and new targets. Only works for guild members.", nil, nil, nil, true)
         GameTooltip:Show()
     end)
     whispersInfoIcon:SetScript("OnLeave", function(self)
@@ -1118,7 +1111,7 @@ end
 
 -- Expose as PI method so SetTestMode can call it
 function PI:UpdateTickerState()
-    if IsInRaid() or PowerInfusionAssignmentsDB.testMode then
+    if PowerInfusionAssignmentsDB.testMode or (PI.playerIsPriest and IsInRaid()) then
         StartScanTicker()
     else
         StopScanTicker()
@@ -1129,6 +1122,7 @@ f:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         C_ChatInfo.RegisterAddonMessagePrefix(PI_MSG_PREFIX)
         PI:InitDB()
+        PI.playerIsPriest = select(2, UnitClass("player")) == "PRIEST"
         if not PowerInfusionAssignmentsDB.firstLoginMessageShown then
             Print("To configure Power Infusion Assignment Helper, type /pi")
             PowerInfusionAssignmentsDB.firstLoginMessageShown = true
