@@ -1,0 +1,10 @@
+tag 5673c1d82a57af24ec47e2afdc10fac453fa97ad 1.2.2
+Author:	sebsimpson <seb@moodle.com>
+Date:	Mon Feb 2 10:55:52 2026 +1100
+
+commit 8db8b908a529794f2000a8710b1de5b480f91617
+Author: sebsimpson <seb@moodle.com>
+Date:   Mon Feb 2 10:55:45 2026 +1100
+
+    Bump to version 1.2.2
+
