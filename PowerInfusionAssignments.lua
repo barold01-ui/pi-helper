@@ -7,7 +7,12 @@ local PI_MSG_PREFIX = "PIAssign"
 local classColorCache = {}
 local reuseLines = {}
 local reusePriests = {}
+local cachedMacroTarget = nil
+local cachedMacroBody = nil
+local cachedMacroIndex = nil
+local cachedMacroName = nil
 
+-- Helper functions
 local function Print(...) DEFAULT_CHAT_FRAME:AddMessage("[PI] "..strjoin(" ", tostringall(...))) end
 
 -- Global function for macro to call (captures mouseover target)
@@ -53,9 +58,169 @@ function PI:GetGroupPriests()
     return result
 end
 
-function PI:BroadcastAssignment()
+function PI:GetPlayerName()
+    local name = UnitName("player") or "Unknown"
+    return name
+end
+
+function PI:GetClassColorForUnit(unit)
+    if not unit or not UnitExists(unit) then return nil end
+    local _, classFile = UnitClass(unit)
+    if classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile] then
+        local c = RAID_CLASS_COLORS[classFile]
+        return string.format("|cff%02x%02x%02x", c.r * 255, c.g * 255, c.b * 255)
+    end
+    return nil
+end
+
+function PI:RefreshClassColorCache()
+    wipe(classColorCache)
+    -- Cache player color
+    local myName = PI:GetPlayerName()
+    classColorCache[myName] = PI:GetClassColorForUnit("player")
+    -- Cache raid members
+    if IsInRaid() then
+        local numGroup = GetNumGroupMembers()
+        for i = 1, numGroup do
+            local unit = "raid"..i
+            if UnitExists(unit) then
+                local unitName, realm = UnitName(unit)
+                if realm and realm ~= "" then
+                    unitName = unitName.."-"..realm
+                end
+                classColorCache[unitName] = PI:GetClassColorForUnit(unit)
+            end
+        end
+    end
+end
+
+function PI:GetClassColorForName(name)
+    if not name or name == "" then return nil end
+    return classColorCache[name]
+end
+
+function PI:ColorText(text, colorCode)
+    if colorCode then
+        return colorCode..text.."|r"
+    end
+    return text
+end
+
+function PI:FindMacroIndexByName(name)
+    if not name or name == "" then return nil end
+    if GetMacroIndexByName then
+        local idx = GetMacroIndexByName(name)
+        if idx and idx > 0 then return idx end
+    end
+    local num = GetNumMacros()
+    for i = 1, num do
+        local mname = select(1, GetMacroInfo(i))
+        if mname == name then return i end
+    end
+    return nil
+end
+
+local function isIgnoredToken(tok)
+    if not tok then return true end
+    tok = strlower(tok)
+    local ignore = {
+        mouseover=true, target=true, focus=true, player=true, pet=true, vehicle=true,
+        exists=true, nodead=true, help=true, harm=true, nouser=true, caster=true, cursor=true,
+    }
+    return ignore[tok]
+end
+
+function PI:ParseMacroForTarget(macroIndex)
+    if not macroIndex then return nil end
+    local body = select(3, GetMacroInfo(macroIndex))
+    if not body or body == "" then return nil end
+    -- search for @Name occurrences and target=Name occurrences
+    -- Use [^%],;%[%]%s]+ to match any characters except delimiters (supports Unicode names)
+    for token in string.gmatch(body, "@([^%],;%[%]%s]+)") do
+        if not isIgnoredToken(token) then
+            return token
+        end
+    end
+    for token in string.gmatch(body, "target=([^%],;%[%]%s]+)") do
+        if not isIgnoredToken(token) then
+            return token
+        end
+    end
+    return nil
+end
+
+function PI:IsPlayerInGuild(playerName)
+    if not playerName or playerName == "" then return false end
+    local numGuildMembers = GetNumGuildMembers()
+    for i = 1, numGuildMembers do
+        local name = GetGuildRosterInfo(i)
+        if name then
+            -- Guild roster names include realm, strip it for comparison
+            local shortName = strsplit("-", name)
+            if shortName == playerName or name == playerName then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function PI:GetRoleForName(name)
+    if not name or name == "" then return nil end
+    -- Check player
+    if UnitName("player") == name then
+        return UnitGroupRolesAssigned("player")
+    end
+    -- Check raid
+    if IsInRaid() then
+        local num = GetNumGroupMembers()
+        for i = 1, num do
+            local unit = "raid"..i
+            if UnitExists(unit) then
+                local uname = UnitName(unit)
+                if uname == name then
+                    return UnitGroupRolesAssigned(unit)
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function PI:IsPlayerInGroup(playerName)
+    if not playerName or playerName == "" then return false end
+    local myName = PI:GetPlayerName()
+    if playerName == myName then return true end
+    return PI.groupMembers[playerName] or false
+end
+
+function PI:IsPlayerInSameZone(playerName)
+    if not playerName or playerName == "" then return false end
+    local myZone = GetZoneText() or ""
+    for i = 1, GetNumGroupMembers() do
+        local unit = "raid"..i
+        if UnitExists(unit) and UnitIsPlayer(unit) then
+            local name, realm = UnitName(unit)
+            if realm and realm ~= "" then
+                name = name.."-"..realm
+            end
+            if name == playerName then
+                local unitZone = GetZoneText(unit) or ""
+                return unitZone == myZone
+            end
+        end
+    end
+    return false
+end
+
+PI.previousTarget = nil
+PI.lastBroadcastedTarget = nil
+
+function PI:BroadcastAssignment(force)
     local player = PI:GetPlayerName()
     local target = PowerInfusionAssignmentsDB.assignments[player]
+    if not force and target == PI.lastBroadcastedTarget then return end
+    PI.lastBroadcastedTarget = target
     if not target or target == "" then return end
     if not IsInRaid() then return end
 
@@ -160,9 +325,11 @@ function PI:InitDB()
     PowerInfusionAssignmentsDB.framePos = PowerInfusionAssignmentsDB.framePos or { point = "CENTER", x = 0, y = -200 }
     PowerInfusionAssignmentsDB.piMode = PowerInfusionAssignmentsDB.piMode or 1  -- 1 = macro mode, 2 = mouseover/target mode
     PowerInfusionAssignmentsDB.testMode = false  -- Always reset test mode on login
+    PI.lastFrameText = nil
+    PI.lastFrameErrorText = nil
+    PI.groupMembers = {}
     if PowerInfusionAssignmentsDB.hideInCombat == nil then PowerInfusionAssignmentsDB.hideInCombat = true end
     if PowerInfusionAssignmentsDB.enableWhispers == nil then PowerInfusionAssignmentsDB.enableWhispers = true end
-    if PowerInfusionAssignmentsDB.firstLoginMessageShown == nil then PowerInfusionAssignmentsDB.firstLoginMessageShown = false end
 end
 
 -- Fake test data for test mode
@@ -186,10 +353,18 @@ local TEST_CLASS_COLORS = {
 function PI:SetTestMode(enabled)
     PowerInfusionAssignmentsDB.testMode = enabled
     if enabled then
+        -- Save real assignments before wiping
+        local realAssignments = {}
+        for k, v in pairs(PowerInfusionAssignmentsDB.assignments) do
+            realAssignments[k] = v
+        end
         wipe(PowerInfusionAssignmentsDB.assignments)
-        -- Populate fake data
+        -- Restore the player's real assignment
         local myName = PI:GetPlayerName()
-        PowerInfusionAssignmentsDB.assignments[myName] = "TestTarget"
+        if realAssignments[myName] then
+            PowerInfusionAssignmentsDB.assignments[myName] = realAssignments[myName]
+        end
+        -- Populate fake data for other priests
         for priest, target in pairs(TEST_ASSIGNMENTS) do
             PowerInfusionAssignmentsDB.assignments[priest] = target
         end
@@ -209,115 +384,6 @@ function PI:SetTestMode(enabled)
     PI:UpdateTickerState()
 end
 
-function PI:GetPlayerName()
-    local name = UnitName("player") or "Unknown"
-    return name
-end
-
-function PI:GetClassColorForUnit(unit)
-    if not unit or not UnitExists(unit) then return nil end
-    local _, classFile = UnitClass(unit)
-    if classFile and RAID_CLASS_COLORS and RAID_CLASS_COLORS[classFile] then
-        local c = RAID_CLASS_COLORS[classFile]
-        return string.format("|cff%02x%02x%02x", c.r * 255, c.g * 255, c.b * 255)
-    end
-    return nil
-end
-
-function PI:RefreshClassColorCache()
-    wipe(classColorCache)
-    -- Cache player color
-    local myName = PI:GetPlayerName()
-    classColorCache[myName] = PI:GetClassColorForUnit("player")
-    -- Cache raid members
-    if IsInRaid() then
-        local numGroup = GetNumGroupMembers()
-        for i = 1, numGroup do
-            local unit = "raid"..i
-            if UnitExists(unit) then
-                local unitName, realm = UnitName(unit)
-                if realm and realm ~= "" then
-                    unitName = unitName.."-"..realm
-                end
-                classColorCache[unitName] = PI:GetClassColorForUnit(unit)
-            end
-        end
-    end
-end
-
-function PI:GetClassColorForName(name)
-    if not name or name == "" then return nil end
-    return classColorCache[name]
-end
-
-function PI:ColorText(text, colorCode)
-    if colorCode then
-        return colorCode..text.."|r"
-    end
-    return text
-end
-
-function PI:FindMacroIndexByName(name)
-    if not name or name == "" then return nil end
-    if GetMacroIndexByName then
-        local idx = GetMacroIndexByName(name)
-        if idx and idx > 0 then return idx end
-    end
-    local num = GetNumMacros()
-    for i = 1, num do
-        local mname = select(1, GetMacroInfo(i))
-        if mname == name then return i end
-    end
-    return nil
-end
-
-local function isIgnoredToken(tok)
-    if not tok then return true end
-    tok = strlower(tok)
-    local ignore = {
-        mouseover=true, target=true, focus=true, player=true, pet=true, vehicle=true,
-        exists=true, nodead=true, help=true, harm=true, nouser=true, caster=true,
-    }
-    return ignore[tok]
-end
-
-function PI:ParseMacroForTarget(macroIndex)
-    if not macroIndex then return nil end
-    local body = select(3, GetMacroInfo(macroIndex))
-    if not body or body == "" then return nil end
-    -- search for @Name occurrences and target=Name occurrences
-    -- Use [^%],;%[%]%s]+ to match any characters except delimiters (supports Unicode names)
-    for token in string.gmatch(body, "@([^%],;%[%]%s]+)") do
-        if not isIgnoredToken(token) then
-            return token
-        end
-    end
-    for token in string.gmatch(body, "target=([^%],;%[%]%s]+)") do
-        if not isIgnoredToken(token) then
-            return token
-        end
-    end
-    return nil
-end
-
-function PI:IsPlayerInGuild(playerName)
-    if not playerName or playerName == "" then return false end
-    local numGuildMembers = GetNumGuildMembers()
-    for i = 1, numGuildMembers do
-        local name = GetGuildRosterInfo(i)
-        if name then
-            -- Guild roster names include realm, strip it for comparison
-            local shortName = strsplit("-", name)
-            if shortName == playerName or name == playerName then
-                return true
-            end
-        end
-    end
-    return false
-end
-
-PI.previousTarget = nil
-
 function PI:ScanMacroAndSave()
     if PI.inCombat then
         return false
@@ -327,11 +393,19 @@ function PI:ScanMacroAndSave()
     if not macroName or macroName == "" then
         return false
     end
-    local idx = PI:FindMacroIndexByName(macroName)
-    if not idx then
+    if macroName ~= cachedMacroName then
+        cachedMacroName = macroName
+        cachedMacroIndex = PI:FindMacroIndexByName(macroName)
+    end
+    if not cachedMacroIndex then
         return false
     end
-    local target = PI:ParseMacroForTarget(idx)
+    local body = select(3, GetMacroInfo(cachedMacroIndex))
+    if body ~= cachedMacroBody then
+        cachedMacroTarget = PI:ParseMacroForTarget(cachedMacroIndex)
+        cachedMacroBody = body
+    end
+    local target = cachedMacroTarget
     if target then
         local player = PI:GetPlayerName()
         local oldTarget = PI.previousTarget
@@ -360,7 +434,7 @@ end
 -- Mode 2: Use the mouseover target set by PI_SetPITarget macro
 function PI:ScanMouseoverAndSave()
     local target = PI.mouseoverTarget
-    if not target or target == "" then
+    if not target or target == "" or target == PI.previousTarget then
         return false
     end
     
@@ -542,7 +616,7 @@ function PI:UpdateAssignmentFrame()
     
     -- Then add other players' assignments
     for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
-        if player ~= myName and target and target ~= "" then
+        if player ~= myName and target and target ~= "" and (PowerInfusionAssignmentsDB.testMode or PI:IsPlayerInSameZone(player)) then
             local playerColor = PI:GetClassColorForName(player)
             local coloredPlayer = PI:ColorText(player, playerColor)
             local targetColor = PI:GetClassColorForName(target)
@@ -562,9 +636,15 @@ function PI:UpdateAssignmentFrame()
         errorLines[#errorLines + 1] = "PI assigned to HEALER or TANK!"
     end
     
-    PI.frame.text:SetText(table.concat(reuseLines, "\n"))
-    PI.frame.errorText:SetText(table.concat(errorLines, "\n"))
-    PI:ResizeAssignmentFrameToText()
+    local newText = table.concat(reuseLines, "\n")
+    local newErrorText = table.concat(errorLines, "\n")
+    if newText ~= PI.lastFrameText or newErrorText ~= PI.lastFrameErrorText then
+        PI.frame.text:SetText(newText)
+        PI.frame.errorText:SetText(newErrorText)
+        PI:ResizeAssignmentFrameToText()
+        PI.lastFrameText = newText
+        PI.lastFrameErrorText = newErrorText
+    end
     
     -- Show/hide warning icon
     if hasDuplicates or hasRoleWarning then
@@ -652,7 +732,7 @@ function PI:CreateOptionsWindow()
     faqText:SetJustifyH("LEFT")
     faqText:SetWordWrap(true)
     faqText:SetSpacing(2)
-    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon")
+    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- warns you if multiple priests are PIing the same person\n- warns you if any priest has PI set to a tank or healer\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon")
     
     local function SelectTab(tabNum)
         if tabNum == 1 then
@@ -1015,32 +1095,6 @@ function PI:UpdateAssignmentFrameVisibility()
     end
 end
 
-function PI:IsPlayerInGroup(playerName)
-    if not playerName or playerName == "" then return false end
-    local myName = PI:GetPlayerName()
-    if playerName == myName then return true end
-    
-    -- Only check raid groups
-    if not IsInRaid() then return false end
-    
-    local numGroup = GetNumGroupMembers()
-    if numGroup == 0 then return false end
-    
-    for i = 1, numGroup do
-        local unit = "raid"..i
-        if UnitExists(unit) then
-            local name, realm = UnitName(unit)
-            if realm and realm ~= "" then
-                name = name.."-"..realm
-            end
-            if name == playerName then
-                return true
-            end
-        end
-    end
-    return false
-end
-
 function PI:CleanupStaleAssignments()
     -- Don't cleanup in test mode, we want to keep the fake data
     if PowerInfusionAssignmentsDB.testMode then return end
@@ -1082,9 +1136,6 @@ local function StartScanTicker()
     scanTicker = C_Timer.NewTicker(3, function()
         if PI.inCombat then return end
         
-        -- In test mode, just keep the frame visible but don't scan/broadcast
-        if PowerInfusionAssignmentsDB.testMode then return end
-        
         PI:CleanupStaleAssignments()
         
         local mode = PowerInfusionAssignmentsDB.piMode or 1
@@ -1092,12 +1143,16 @@ local function StartScanTicker()
             -- Mode 1: scan macro for target
             if PowerInfusionAssignmentsDB.macroName and PowerInfusionAssignmentsDB.macroName ~= "" then
                 PI:ScanMacroAndSave()
-                PI:BroadcastAssignment()
+                if not PowerInfusionAssignmentsDB.testMode then
+                    PI:BroadcastAssignment()
+                end
             end
         else
             -- Mode 2: use mouseover target from PI_SetPITarget macro
             PI:ScanMouseoverAndSave()
-            PI:BroadcastAssignment()
+            if not PowerInfusionAssignmentsDB.testMode then
+                PI:BroadcastAssignment()
+            end
         end
     end)
 end
@@ -1123,10 +1178,7 @@ f:SetScript("OnEvent", function(self, event, ...)
         C_ChatInfo.RegisterAddonMessagePrefix(PI_MSG_PREFIX)
         PI:InitDB()
         PI.playerIsPriest = select(2, UnitClass("player")) == "PRIEST"
-        if not PowerInfusionAssignmentsDB.firstLoginMessageShown then
-            Print("To configure Power Infusion Assignment Helper, type /pi")
-            PowerInfusionAssignmentsDB.firstLoginMessageShown = true
-        end
+        Print("To configure Power Infusion Assignment Helper, type /pi")
         PI:RefreshClassColorCache()
         PI:CreateAssignmentFrame()
         PI:CreateOptionsWindow()
@@ -1144,10 +1196,27 @@ f:SetScript("OnEvent", function(self, event, ...)
         local prefix, message, channel, sender = ...
         PI:OnAddonMessage(prefix, message, channel, sender)
     elseif event == "GROUP_ROSTER_UPDATE" then
+        wipe(PI.groupMembers)
+        if IsInRaid() then
+            for i = 1, GetNumGroupMembers() do
+                local unit = "raid"..i
+                if UnitExists(unit) then
+                    local name, realm = UnitName(unit)
+                    if realm and realm ~= "" then
+                        name = name.."-"..realm
+                    end
+                    PI.groupMembers[name] = true
+                end
+            end
+        end
         PI:RefreshClassColorCache()
         PI:CleanupStaleAssignments()
         PI:UpdateAssignmentFrameVisibility()
         PI:UpdateTickerState()
+        -- Broadcast current assignment to new group members
+        if PI.playerIsPriest and IsInRaid() and not PowerInfusionAssignmentsDB.testMode then
+            PI:BroadcastAssignment(true)
+        end
     elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" then
         local message, sender = ...
         PI:OnChatMessage(message, sender)
