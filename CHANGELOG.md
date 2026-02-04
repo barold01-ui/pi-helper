@@ -2,6 +2,16 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.2.9]
+
+- performance improvements
+- improvements to "Test Mode"
+- added zone filtering (only players in your raid group + zone are shown)
+
+## [1.2.8]
+
+- performance improvements
+
 ## [1.2.7]
 
 - bump version to handle commit issue
