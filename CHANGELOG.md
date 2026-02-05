@@ -2,6 +2,11 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.3.5]
+
+- added scale slider
+- stopped UI elements from loading for non-priest classes
+
 ## [1.3.4]
 
 - bump version
