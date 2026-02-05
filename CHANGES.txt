@@ -1,6 +1,10 @@
-PowerInfusionAssignments Changelog
-==================================
+tag e7be9397a818fd2136d9edd4d52463d5437c37c7 1.3.4
+Author:	aname43 <barold01@gmail.com>
+Date:	Thu Feb 5 16:20:00 2026 +1100
 
-Version 1.3.3 (2024-06-XX)
---------------------------
-- Minor UI improvements and code cleanup.
+commit 20cea551e135fccf8d4931d55aec6a9c454368c6
+Author: aname43 <barold01@gmail.com>
+Date:   Thu Feb 5 16:19:55 2026 +1100
+
+    1.3.4
+

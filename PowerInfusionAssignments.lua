@@ -329,11 +329,12 @@ function PI:InitDB()
     PI.groupMembers = {}
     if PowerInfusionAssignmentsDB.hideInCombat == nil then PowerInfusionAssignmentsDB.hideInCombat = true end
     if PowerInfusionAssignmentsDB.enableWhispers == nil then PowerInfusionAssignmentsDB.enableWhispers = true end
+    PowerInfusionAssignmentsDB.scale = PowerInfusionAssignmentsDB.scale or 1
 end
 
 -- Fake test data for test mode
 local TEST_ASSIGNMENTS = {
-    ["Priest 2"] = "Roguemaster",
+    ["Priest 2"] = "Roguestabber",
     ["Priest 3"] = "Dpswarrior",
     ["Priest 4"] = "Firemage",
 }
@@ -489,6 +490,8 @@ function PI:CreateAssignmentFrame()
     f:SetClampedToScreen(true)
     f:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
     f:SetBackdropColor(0,0,0,0.6)
+
+    f:SetScale(PowerInfusionAssignmentsDB.scale or 1)
 
     local text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     text:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -10)
@@ -659,7 +662,7 @@ end
 function PI:CreateOptionsWindow()
     if PI.options then return end
     local o = CreateFrame("Frame", "PIOptionsWindow", UIParent, "BackdropTemplate")
-    o:SetSize(400, 350)
+    o:SetSize(400, 400)
     o:SetScale(1.5)
     o:SetFrameStrata("DIALOG")
     o:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
@@ -841,12 +844,12 @@ function PI:CreateOptionsWindow()
     
     -- Example macro section (only visible in macro mode)
     local exampleMacroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    exampleMacroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -90)
+    exampleMacroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -105)
     exampleMacroLabel:SetText("Example macro (if you need to create one)")
 
     local exampleMacroScroll = CreateFrame("ScrollFrame", "PI_ExampleMacroScroll", tab1Content, "UIPanelScrollFrameTemplate,BackdropTemplate")
     exampleMacroScroll:SetSize(340, 60)
-    exampleMacroScroll:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -100)
+    exampleMacroScroll:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -115)
     exampleMacroScroll:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
     exampleMacroScroll:SetBackdropColor(0, 0, 0, 1)
     exampleMacroScroll:SetBackdropBorderColor(1, 0.82, 0, 1)
@@ -981,7 +984,7 @@ function PI:CreateOptionsWindow()
 
     -- Hide in combat checkbox
     local hideInCombatCheck = CreateFrame("CheckButton", "PI_HideInCombatCheckbox", tab1Content, "UICheckButtonTemplate")
-    hideInCombatCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 60)
+    hideInCombatCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 110)
     hideInCombatCheck:SetSize(24, 24)
     hideInCombatCheck:SetChecked(PowerInfusionAssignmentsDB.hideInCombat)
     hideInCombatCheck:SetScript("OnClick", function(self)
@@ -995,7 +998,7 @@ function PI:CreateOptionsWindow()
 
     -- Enable whispers checkbox
     local enableWhispersCheck = CreateFrame("CheckButton", "PI_EnableWhispersCheckbox", tab1Content, "UICheckButtonTemplate")
-    enableWhispersCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 36)
+    enableWhispersCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 90)
     enableWhispersCheck:SetSize(24, 24)
     enableWhispersCheck:SetChecked(PowerInfusionAssignmentsDB.enableWhispers)
     enableWhispersCheck:SetScript("OnClick", function(self)
@@ -1027,7 +1030,7 @@ function PI:CreateOptionsWindow()
 
     -- Test mode checkbox
     local testModeCheck = CreateFrame("CheckButton", "PI_TestModeCheckbox", tab1Content, "UICheckButtonTemplate")
-    testModeCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 12)
+    testModeCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 70)
     testModeCheck:SetSize(24, 24)
     testModeCheck:SetChecked(PowerInfusionAssignmentsDB.testMode or false)
     testModeCheck:SetScript("OnClick", function(self)
@@ -1037,6 +1040,49 @@ function PI:CreateOptionsWindow()
     local testModeLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     testModeLabel:SetPoint("LEFT", testModeCheck, "RIGHT", 2, 0)
     testModeLabel:SetText("Test mode (show fake data)")
+
+    -- Scale slider
+    local scaleSlider = CreateFrame("Slider", "PI_ScaleSlider", tab1Content, "OptionsSliderTemplate")
+    scaleSlider:SetPoint("BOTTOM", tab1Content, "BOTTOM", 0, 18)
+    scaleSlider:SetMinMaxValues(0.0, 2.0)
+    scaleSlider:SetValueStep(0.05)
+    scaleSlider:SetValue(PowerInfusionAssignmentsDB.scale or 1)
+    _G["PI_ScaleSliderLow"]:SetText("0")
+    _G["PI_ScaleSliderHigh"]:SetText("2")
+
+    local scaleLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    scaleLabel:SetPoint("RIGHT", scaleSlider, "LEFT", -8, 0)
+    scaleLabel:SetText("Scale")
+
+    local scaleInput = CreateFrame("EditBox", "PI_ScaleInput", tab1Content, "InputBoxTemplate")
+    scaleInput:SetAutoFocus(false)
+    scaleInput:SetPoint("LEFT", scaleSlider, "RIGHT", 8, 0)
+    scaleInput:SetSize(50, 20)
+    scaleInput:SetText(string.format("%.2f", PowerInfusionAssignmentsDB.scale or 1))
+    scaleInput:SetScript("OnTextChanged", function(self)
+        local text = self:GetText()
+        local filtered = text:gsub("[^0-9.]", "")
+        if filtered ~= text then
+            self:SetText(filtered)
+        end
+    end)
+    scaleInput:SetScript("OnEnterPressed", function(self)
+        local value = tonumber(self:GetText())
+        if value and value >= 0.0 and value <= 2.0 then
+            PowerInfusionAssignmentsDB.scale = value
+            scaleSlider:SetValue(value)
+            if PI.frame then PI.frame:SetScale(value) end
+        else
+            self:SetText(string.format("%.2f", PowerInfusionAssignmentsDB.scale or 1))
+        end
+        self:ClearFocus()
+    end)
+
+    scaleSlider:SetScript("OnValueChanged", function(self, value)
+        PowerInfusionAssignmentsDB.scale = value
+        scaleInput:SetText(string.format("%.2f", value))
+        if PI.frame then PI.frame:SetScale(value) end
+    end)
 
     o.macroHintText = macroHintText
     o.macroLabel = macroLabel
@@ -1060,6 +1106,22 @@ function PI:CreateOptionsWindow()
     end
     o.UpdateHintVisibility = UpdateHintVisibility
     
+    -- Clear focus from edit boxes when window is shown
+    o:SetScript("OnShow", function(self)
+        if self.edit then self.edit:ClearFocus() end
+        if self.exampleMacroEdit then self.exampleMacroEdit:ClearFocus() end
+        if self.mouseoverMacroEdit then self.mouseoverMacroEdit:ClearFocus() end
+        local scaleInput = _G["PI_ScaleInput"]
+        if scaleInput then scaleInput:ClearFocus() end
+    end)
+    
+    -- Clear focus from all edit boxes after creation
+    if o.edit then o.edit:ClearFocus() end
+    if o.exampleMacroEdit then o.exampleMacroEdit:ClearFocus() end
+    if o.mouseoverMacroEdit then o.mouseoverMacroEdit:ClearFocus() end
+    local scaleInput = _G["PI_ScaleInput"]
+    if scaleInput then scaleInput:ClearFocus() end
+    
     PI.options = o
 
     -- Initialize visibility based on current mode
@@ -1082,11 +1144,19 @@ PI.inCombat = false
 
 function PI:UpdateAssignmentFrameVisibility()
     if not PI.frame then return end
-    -- Hide during combat if option is enabled (applies to both test mode and normal mode)
+    -- Test mode bypasses all other visibility criteria
+    if PowerInfusionAssignmentsDB.testMode then
+        PI.frame:Show()
+        return
+    end
+    -- Always hide for non-priests
+    if not PI.playerIsPriest then
+        PI.frame:Hide()
+        return
+    end
+    -- Hide during combat if option is enabled
     if PI.inCombat and PowerInfusionAssignmentsDB.hideInCombat then
         PI.frame:Hide()
-    elseif PowerInfusionAssignmentsDB.testMode then
-        PI.frame:Show()
     elseif IsInRaid() then
         PI.frame:Show()
     else
