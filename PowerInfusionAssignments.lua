@@ -1,5 +1,4 @@
 local addonName = "PowerInfusionAssignments"
-
 local PI = {}
 local PI_MSG_PREFIX = "PIAssign"
 
