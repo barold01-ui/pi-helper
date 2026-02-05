@@ -2,7 +2,7 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
-## [1.3.3]
+## [1.3.4]
 
 - bump version
 
