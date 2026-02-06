@@ -2,7 +2,7 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
-## [1.3.6]
+## [1.3.7]
 
 - fixed bug in scale slider
 - fixed zone checks to correctly detect player zone changes / mismatches
