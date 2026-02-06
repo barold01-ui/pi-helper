@@ -2,6 +2,14 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.3.6]
+
+- fixed bug in scale slider
+- fixed zone checks to correctly detect player zone changes / mismatches
+- fixed UI element showing at incorrect times
+- added option for non priests to show PI assignment window
+- other bugfixes
+
 ## [1.3.5]
 
 - added scale slider
