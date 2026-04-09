@@ -2,6 +2,11 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.4.1]
+
+- some fixes and improvements to recent features.
+- fixed warnings to only fire while in raid content, not in open world
+
 ## [1.3.9]
 
 - add a check to catch PI targets which are not in the raid / not in same zone

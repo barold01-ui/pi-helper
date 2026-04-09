@@ -692,7 +692,6 @@ end
 
 function PI:UpdateAssignmentFrame()
     PI:CreateAssignmentFrame()
-    
     wipe(reuseLines)
     local myName = PI:GetPlayerName()
     
@@ -721,10 +720,18 @@ function PI:UpdateAssignmentFrame()
         end
     end
     
-    -- Check for duplicate targets and role warnings
-    local hasDuplicates, duplicateTarget = PI:CheckForDuplicateTargets()
-    local hasRoleWarning = PI:CheckForRoleWarnings()
-    local targetsNotInZone = PI:CheckIfPITargetsInCorrectZone()
+    -- Check for duplicate targets, role warnings (PI assigned healer/tank), or PI targets in wrong zones
+    local _, instanceType, _, _ = GetInstanceInfo()
+    local hasDuplicates = false
+    local hasRoleWarning = false
+    local targetsNotInZone = false
+    
+    -- only run these checks if we're actually in a raid, no point showing them in a major city or outdoor zones
+    if instanceType == "raid" then
+        hasDuplicates, duplicateTarget = PI:CheckForDuplicateTargets()
+        hasRoleWarning = PI:CheckForRoleWarnings()
+        targetsNotInZone = PI:CheckIfPITargetsInCorrectZone()
+    end
     local errorLines = {}
     if hasDuplicates then
         errorLines[#errorLines + 1] = "Duplicate PI targets!"
@@ -734,7 +741,7 @@ function PI:UpdateAssignmentFrame()
     end
     if targetsNotInZone then
         errorLines[#errorLines + 1] = "One or more PI targets are in a different zone!"
-    end    
+    end
     local newText = table.concat(reuseLines, "\n")
     local newErrorText = table.concat(errorLines, "\n")
     if newText ~= PI.lastFrameText or newErrorText ~= PI.lastFrameErrorText then
@@ -746,7 +753,7 @@ function PI:UpdateAssignmentFrame()
     end
     
     -- Show/hide warning icon
-    if hasDuplicates or hasRoleWarning then
+    if hasDuplicates or hasRoleWarning or targetsNotInZone then
         PI.frame.warningIconTop:Show()
         PI.frame.flashElapsed = 0
         PI.frame.flashVisible = true
