@@ -626,6 +626,16 @@ function PI:CheckForDuplicateTargets()
     return false, nil
 end
 
+function PI:CheckIfPITargetsInCorrectZone()
+    -- check if all priest's PI targets are in the same zone as the player.
+    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
+        if target and target ~= "" and not PI:IsPlayerInSameZone(target) then
+            return true, target
+        end
+    end
+    return false, nil
+end
+
 function PI:GetRoleForName(name)
     if not name or name == "" then return nil end
     -- Check player
@@ -714,6 +724,7 @@ function PI:UpdateAssignmentFrame()
     -- Check for duplicate targets and role warnings
     local hasDuplicates, duplicateTarget = PI:CheckForDuplicateTargets()
     local hasRoleWarning = PI:CheckForRoleWarnings()
+    local targetsNotInZone = PI:CheckIfPITargetsInCorrectZone()
     local errorLines = {}
     if hasDuplicates then
         errorLines[#errorLines + 1] = "Duplicate PI targets!"
@@ -721,7 +732,9 @@ function PI:UpdateAssignmentFrame()
     if hasRoleWarning then
         errorLines[#errorLines + 1] = "PI assigned to HEALER or TANK!"
     end
-    
+    if targetsNotInZone then
+        errorLines[#errorLines + 1] = "One or more PI targets are in a different zone!"
+    end    
     local newText = table.concat(reuseLines, "\n")
     local newErrorText = table.concat(errorLines, "\n")
     if newText ~= PI.lastFrameText or newErrorText ~= PI.lastFrameErrorText then
