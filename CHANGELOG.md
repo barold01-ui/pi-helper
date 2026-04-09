@@ -2,6 +2,10 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.3.9]
+
+- add a check to catch PI targets which are not in the raid / not in same zone
+
 ## [1.3.7]
 
 - fixed bug in scale slider
