@@ -4,7 +4,11 @@ All notable changes to Power Infusion Assignment Helper will be documented in th
 
 ## [1.4.2]
 
-- some fixes and improvements to recent features
+- bump toc for 12.0.7
+
+## [1.4.1]
+
+- some fixes and improvements to recent features.
 - fixed warnings to only fire while in raid content, not in open world
 
 ## [1.3.9]
