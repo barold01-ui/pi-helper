@@ -2,9 +2,13 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
-## [1.4.2]
+## [1.4.4]
 
 - bump toc for 12.0.7
+
+## [1.4.2]
+
+- some fixes and improvements to recent features
 
 ## [1.4.1]
 
