@@ -2,6 +2,10 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.4.5]
+
+- fixed cross realm class colours
+
 ## [1.4.4]
 
 - bump toc for 12.0.7

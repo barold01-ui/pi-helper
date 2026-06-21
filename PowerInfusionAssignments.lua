@@ -113,6 +113,11 @@ function PI:GetPlayerName()
     return name
 end
 
+function PI:StripRealm(name)
+    if not name or name == "" then return name end
+    return strsplit("-", name)
+end
+
 function PI:GetClassColorForUnit(unit)
     if not unit or not UnitExists(unit) then return nil end
     local _, classFile = UnitClass(unit)
@@ -126,8 +131,15 @@ end
 function PI:RefreshClassColorCache()
     wipe(classColorCache)
     -- Cache player color
-    local myName = PI:GetPlayerName()
-    classColorCache[myName] = PI:GetClassColorForUnit("player")
+    local myName, myRealm = UnitName("player")
+    myName = myName or PI:GetPlayerName()
+    local myFullName = myName
+    if myRealm and myRealm ~= "" then
+        myFullName = myName.."-"..myRealm
+    end
+    local myColor = PI:GetClassColorForUnit("player")
+    classColorCache[myName] = myColor
+    classColorCache[myFullName] = myColor
     -- Cache raid members
     if IsInRaid() then
         local numGroup = GetNumGroupMembers()
@@ -135,10 +147,13 @@ function PI:RefreshClassColorCache()
             local unit = "raid"..i
             if UnitExists(unit) and UnitIsConnected(unit) then
                 local unitName, realm = UnitName(unit)
+                local unitFullName = unitName
                 if realm and realm ~= "" then
-                    unitName = unitName.."-"..realm
+                    unitFullName = unitName.."-"..realm
                 end
-                classColorCache[unitName] = PI:GetClassColorForUnit(unit)
+                local unitColor = PI:GetClassColorForUnit(unit)
+                classColorCache[unitName] = unitColor
+                classColorCache[unitFullName] = unitColor
             end
         end
     end
@@ -146,7 +161,43 @@ end
 
 function PI:GetClassColorForName(name)
     if not name or name == "" then return nil end
-    return classColorCache[name]
+    local color = classColorCache[name]
+    if color then
+        return color
+    end
+
+    local shortName = PI:StripRealm(name)
+    color = classColorCache[shortName]
+    if color then
+        classColorCache[name] = color
+        return color
+    end
+
+    if IsInRaid() then
+        local numGroup = GetNumGroupMembers()
+        for i = 1, numGroup do
+            local unit = "raid"..i
+            if UnitExists(unit) and UnitIsConnected(unit) then
+                local unitName, realm = UnitName(unit)
+                local unitFullName = unitName
+                if realm and realm ~= "" then
+                    unitFullName = unitName.."-"..realm
+                end
+                if name == unitName or name == unitFullName or shortName == unitName then
+                    color = PI:GetClassColorForUnit(unit)
+                    if color then
+                        classColorCache[unitName] = color
+                        classColorCache[unitFullName] = color
+                        classColorCache[name] = color
+                        classColorCache[shortName] = color
+                    end
+                    return color
+                end
+            end
+        end
+    end
+
+    return nil
 end
 
 function PI:ColorText(text, colorCode)
