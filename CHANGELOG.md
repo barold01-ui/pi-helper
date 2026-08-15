@@ -2,6 +2,19 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.5.0]
+
+- redesigned the options window with a sidebar; all the same settings
+- fixed cross-realm priests dropping off the list, and the warnings not
+  firing for them
+- fixed zone checks comparing everyone against your own zone
+- fixed whispers to cross-realm targets
+- PI targets who left the raid now say so instead of "different zone"
+- !pi is rate limited and packs its reply into fewer messages
+- assignments no longer flicker on loading screens
+- performance improvements
+- still works alongside priests running 1.4.x
+
 ## [1.4.5]
 
 - fixed cross realm class colours

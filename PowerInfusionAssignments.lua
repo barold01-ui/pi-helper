@@ -1,32 +1,84 @@
-local addonName = "PowerInfusionAssignments"
 local PI = {}
 local PI_MSG_PREFIX = "PIAssign"
 
--- Initialize saved variables for new users
-if not PowerInfusionAssignmentsDB then PowerInfusionAssignmentsDB = {} end
-PowerInfusionAssignmentsDB.assignments = PowerInfusionAssignmentsDB.assignments or {}
+-- Fake test data for test mode. Names are stored unqualified here and get a
+-- realm attached by SetTestMode, so they key the same way as real players.
+local TEST_ASSIGNMENTS = {
+    ["Priest 2"] = "Roguestabber",
+    ["Priest 3"] = "Roguestabber",  -- Duplicate target to test warnings
+    ["Priest 4"] = "Tankwarrior",
+}
 
--- Cached data
+-- Class colors for fake test data (priest = white, others = class colors)
+local TEST_CLASS_COLORS = {
+    ["Priest 2"] = "|cffFFFFFF",      -- White (Priest)
+    ["Priest 3"] = "|cffFFFFFF",      -- White (Priest)
+    ["Priest 4"] = "|cffFFFFFF",      -- White (Priest)
+    ["Roguestabber"] = "|cffFFF468",  -- Rogue yellow
+    ["Tankwarrior"] = "|cffC69B6D",   -- Warrior brown
+}
+
+-- Roster caches, all keyed by realm-qualified name. Rebuilt as one pass by
+-- PI:RefreshRoster(); nothing else may write to them.
+local groupMembers = {}
+local memberZones = {}
+local memberRoles = {}
+local memberInGuild = {}
 local classColorCache = {}
+local shortToFull = {}    -- "Name" -> "Name-Realm", for names off the wire
+local rosterNames = {}    -- raid index -> qualified name, until the next rebuild
+local rosterCount = 0
+
+-- "raid1".."raid40", built once instead of concatenating them every pass.
+local RAID_UNITS = {}
+for i = 1, 40 do RAID_UNITS[i] = "raid"..i end
+
+-- Scratch tables reused so the 3 second ticker doesn't churn garbage.
 local reuseLines = {}
+local reuseErrorLines = {}
 local reusePriests = {}
+local reuseReport = {}
+local reuseTargetCounts = {}
+
+-- Macro parse cache
 local cachedMacroTarget = nil
 local cachedMacroBody = nil
 local cachedMacroIndex = nil
 local cachedMacroName = nil
 
+-- Resolved once at login; every stored name is qualified against this realm.
+local myFullName = nil
+local myRealm = nil
+
 -- Ticker management
 local scanTicker = nil
+
+-- Several priests broadcasting inside the same tick would each rebuild the
+-- whole display. Coalesce them into one rebuild on the next frame.
+local updateQueued = false
+local function RunQueuedUpdate()
+    updateQueued = false
+    PI:UpdateAssignmentFrame()
+end
+
+function PI:RequestFrameUpdate()
+    if updateQueued then return end
+    updateQueued = true
+    C_Timer.After(0, RunQueuedUpdate)
+end
 
 local function StartScanTicker()
     if scanTicker then return end -- Already running
     scanTicker = C_Timer.NewTicker(3, function()
         if PI.inCombat then return end
+        -- Zone is the only roster field that changes without an event, so the
+        -- tick refreshes just that; everything else waits for a roster update.
+        PI:RefreshZones()
         PI:CleanupStaleAssignments()
         PI:UpdateAssignmentFrameVisibility()
-        -- non priests don't need to broadcast, exit early        
+        -- non priests don't need to broadcast, exit early
         if not PI.playerIsPriest then return end
-        
+
         local mode = PowerInfusionAssignmentsDB.piMode or 1
         if mode == 1 then
             -- Mode 1: scan macro for target
@@ -53,69 +105,77 @@ local function StopScanTicker()
     end
 end
 
--- Global function for macro to call (captures mouseover target)
-function PI_SetPITarget()
-    local name, realm = UnitName("mouseover")
-    if not name then
-        return
-    end
-    if realm and realm ~= "" then
-        name = name.."-"..realm
-    end
-    PI.mouseoverTarget = name
-    print("PI target set to: "..name)
+-- Names are stored realm-qualified ("Name-Realm") everywhere. A short name is
+-- ambiguous across connected realms, and mixing the two forms was silently
+-- dropping cross-realm priests out of the group and role checks.
+function PI:Qualify(name, realm)
+    if not name or name == "" then return nil end
+    if realm and realm ~= "" then return name.."-"..realm end
+    if string.find(name, "-", 1, true) then return name end
+    if not myRealm or myRealm == "" then return name end
+    return name.."-"..myRealm
 end
 
-function PI:PopulateRaidMembers()
-    for i = 1, GetNumGroupMembers() do
-        local unit = "raid"..i
-        if UnitExists(unit) and UnitIsConnected(unit) then
-            local name, realm = UnitName(unit)
-            if realm and realm ~= "" then
-                name = name.."-"..realm
-            end
-            PI.groupMembers[name] = true
-        end
-    end
+function PI:ShortName(name)
+    if not name or name == "" then return name end
+    return (strsplit("-", name))
 end
 
-function PI:GetMyGuildName()
-    local guildName = GetGuildInfo("player")
-    return guildName
+function PI:GetUnitName(unit)
+    local name, realm = UnitName(unit)
+    return PI:Qualify(name, realm)
 end
 
-function PI:GetGroupPriests()
-    local result = {}
-    -- Only work in raid groups
-    if not IsInRaid() then return result end
+-- Realm names can contain a hyphen ("Azjol-Nerub"), so the realm is everything
+-- after the *first* separator rather than the second field of a split.
+local function RealmOf(fullName)
+    local sep = string.find(fullName, "-", 1, true)
+    if sep then return string.sub(fullName, sep + 1) end
+    return myRealm
+end
 
-    local numGroup = GetNumGroupMembers()
-    if numGroup == 0 then return result end
+-- Wire format, for compatibility with 1.4.x clients still in the raid. 1.4.x
+-- keyed everything off UnitName, which only appends a realm when it differs
+-- from the reader's, so we emit that same shape and put the realm back on
+-- receipt using the sender's. A 1.4.x client therefore sees exactly what
+-- another 1.4.x client would have sent it.
+function PI:ToWire(fullName)
+    if not fullName or fullName == "" then return "" end
+    if RealmOf(fullName) == myRealm then return PI:ShortName(fullName) end
+    return fullName
+end
 
-    for i = 1, numGroup do
-        local unit = "raid"..i
-        if UnitExists(unit) then
-            local name, realm = UnitName(unit)
-            if realm and realm ~= "" then
-                name = name.."-"..realm
-            end
-            local _, classFile = UnitClass(unit)
-            if classFile == "PRIEST" and name ~= PI:GetPlayerName() then
-                table.insert(result, name)
-            end
-        end
-    end
-    return result
+function PI:FromWire(name, senderRealm)
+    if not name or name == "" then return nil end
+    if string.find(name, "-", 1, true) then return name end
+    local guess = name.."-"..(senderRealm or myRealm)
+    if groupMembers[guess] then return guess end
+    -- 1.4.x sent bare names even for cross-realm targets, so fall back to
+    -- whoever in the raid actually answers to this name.
+    return shortToFull[name] or guess
 end
 
 function PI:GetPlayerName()
-    local name = UnitName("player") or "Unknown"
-    return name
+    return myFullName or "Unknown"
 end
 
-function PI:StripRealm(name)
-    if not name or name == "" then return name end
-    return strsplit("-", name)
+-- Macro bodies contain whatever the player typed, which is usually just a
+-- first name. Match it against the roster so a cross-realm target keeps its
+-- own realm instead of being silently reassigned to ours.
+function PI:ResolveName(name)
+    if not name or name == "" then return nil end
+    if string.find(name, "-", 1, true) then return name end
+    return shortToFull[name] or PI:Qualify(name)
+end
+
+-- Global function for macro to call (captures mouseover target)
+function PI_SetPITarget()
+    local name = PI:GetUnitName("mouseover")
+    if not name then
+        return
+    end
+    PI.mouseoverTarget = name
+    print("PI target set to: "..PI:ShortName(name))
 end
 
 function PI:GetClassColorForUnit(unit)
@@ -128,76 +188,76 @@ function PI:GetClassColorForUnit(unit)
     return nil
 end
 
-function PI:RefreshClassColorCache()
+-- One pass over the raid fills every per-member cache. Zone comes from
+-- GetRaidRosterInfo (GetZoneText only ever reports our own zone, whatever
+-- unit you pass it) and guild membership from UnitIsInMyGuild, which needs
+-- no roster request the way GetGuildRosterInfo does.
+function PI:RefreshRoster()
+    wipe(groupMembers)
+    wipe(memberZones)
+    wipe(memberRoles)
+    wipe(memberInGuild)
     wipe(classColorCache)
-    -- Cache player color
-    local myName, myRealm = UnitName("player")
-    myName = myName or PI:GetPlayerName()
-    local myFullName = myName
-    if myRealm and myRealm ~= "" then
-        myFullName = myName.."-"..myRealm
-    end
-    local myColor = PI:GetClassColorForUnit("player")
-    classColorCache[myName] = myColor
-    classColorCache[myFullName] = myColor
-    -- Cache raid members
-    if IsInRaid() then
-        local numGroup = GetNumGroupMembers()
-        for i = 1, numGroup do
-            local unit = "raid"..i
-            if UnitExists(unit) and UnitIsConnected(unit) then
-                local unitName, realm = UnitName(unit)
-                local unitFullName = unitName
-                if realm and realm ~= "" then
-                    unitFullName = unitName.."-"..realm
-                end
-                local unitColor = PI:GetClassColorForUnit(unit)
-                classColorCache[unitName] = unitColor
-                classColorCache[unitFullName] = unitColor
+    wipe(shortToFull)
+    wipe(rosterNames)
+    rosterCount = IsInRaid() and GetNumGroupMembers() or 0
+
+    local myName = PI:GetPlayerName()
+    groupMembers[myName] = true
+    memberZones[myName] = GetZoneText() or ""
+    memberRoles[myName] = UnitGroupRolesAssigned("player")
+    memberInGuild[myName] = true
+    classColorCache[myName] = PI:GetClassColorForUnit("player")
+    shortToFull[PI:ShortName(myName)] = myName
+
+    for i = 1, rosterCount do
+        local unit = RAID_UNITS[i]
+        if unit and UnitExists(unit) and UnitIsConnected(unit) then
+            local fullName = PI:GetUnitName(unit)
+            if fullName and fullName ~= myName then
+                local _, _, _, _, _, _, zone = GetRaidRosterInfo(i)
+                rosterNames[i] = fullName
+                groupMembers[fullName] = true
+                memberZones[fullName] = zone
+                memberRoles[fullName] = UnitGroupRolesAssigned(unit)
+                memberInGuild[fullName] = UnitIsInMyGuild(unit) and true or false
+                classColorCache[fullName] = PI:GetClassColorForUnit(unit)
+                -- First one wins, so two same-named players from different
+                -- realms resolve the way the roster is ordered rather than randomly.
+                local short = PI:ShortName(fullName)
+                if not shortToFull[short] then shortToFull[short] = fullName end
             end
+        end
+    end
+
+    -- Test mode's fake priests aren't on the roster, so re-add their colours.
+    if PowerInfusionAssignmentsDB.testMode then
+        for name, color in pairs(TEST_CLASS_COLORS) do
+            classColorCache[PI:Qualify(name)] = color
+        end
+    end
+end
+
+-- Called every tick. Raid indices only shift on a GROUP_ROSTER_UPDATE, which
+-- does the full rebuild, so the cached names still line up; the size check is
+-- there in case that event is ever missed.
+function PI:RefreshZones()
+    if (IsInRaid() and GetNumGroupMembers() or 0) ~= rosterCount then
+        return PI:RefreshRoster()
+    end
+    memberZones[PI:GetPlayerName()] = GetZoneText() or ""
+    for i = 1, rosterCount do
+        local fullName = rosterNames[i]
+        if fullName then
+            local _, _, _, _, _, _, zone = GetRaidRosterInfo(i)
+            memberZones[fullName] = zone
         end
     end
 end
 
 function PI:GetClassColorForName(name)
     if not name or name == "" then return nil end
-    local color = classColorCache[name]
-    if color then
-        return color
-    end
-
-    local shortName = PI:StripRealm(name)
-    color = classColorCache[shortName]
-    if color then
-        classColorCache[name] = color
-        return color
-    end
-
-    if IsInRaid() then
-        local numGroup = GetNumGroupMembers()
-        for i = 1, numGroup do
-            local unit = "raid"..i
-            if UnitExists(unit) and UnitIsConnected(unit) then
-                local unitName, realm = UnitName(unit)
-                local unitFullName = unitName
-                if realm and realm ~= "" then
-                    unitFullName = unitName.."-"..realm
-                end
-                if name == unitName or name == unitFullName or shortName == unitName then
-                    color = PI:GetClassColorForUnit(unit)
-                    if color then
-                        classColorCache[unitName] = color
-                        classColorCache[unitFullName] = color
-                        classColorCache[name] = color
-                        classColorCache[shortName] = color
-                    end
-                    return color
-                end
-            end
-        end
-    end
-
-    return nil
+    return classColorCache[name]
 end
 
 function PI:ColorText(text, colorCode)
@@ -221,14 +281,14 @@ function PI:FindMacroIndexByName(name)
     return nil
 end
 
+local IGNORED_TOKENS = {
+    mouseover=true, target=true, focus=true, player=true, pet=true, vehicle=true,
+    exists=true, nodead=true, help=true, harm=true, nouser=true, caster=true, cursor=true,
+}
+
 local function isIgnoredToken(tok)
     if not tok then return true end
-    tok = strlower(tok)
-    local ignore = {
-        mouseover=true, target=true, focus=true, player=true, pet=true, vehicle=true,
-        exists=true, nodead=true, help=true, harm=true, nouser=true, caster=true, cursor=true,
-    }
-    return ignore[tok]
+    return IGNORED_TOKENS[strlower(tok)]
 end
 
 function PI:ParseMacroForTarget(macroIndex)
@@ -251,83 +311,35 @@ function PI:ParseMacroForTarget(macroIndex)
 end
 
 function PI:IsPlayerInGuild(playerName)
-    if not playerName or playerName == "" then return false end
-    local numGuildMembers = GetNumGuildMembers()
-    for i = 1, numGuildMembers do
-        local name = GetGuildRosterInfo(i)
-        if name then
-            -- Guild roster names include realm, strip it for comparison
-            local shortName = strsplit("-", name)
-            if shortName == playerName or name == playerName then
-                return true
-            end
-        end
-    end
-    return false
+    if not playerName then return false end
+    return memberInGuild[playerName] or false
 end
 
 function PI:IsPlayerInGroup(playerName)
     if not playerName or playerName == "" then return false end
-    local myName = PI:GetPlayerName()
-    if playerName == myName then return true end
-    return PI.groupMembers[playerName] or false
+    return groupMembers[playerName] or false
+end
+
+function PI:IsPlayerInZone(playerName, zone)
+    if not PI:IsPlayerInGroup(playerName) then return false end
+    local playerZone = memberZones[playerName]
+    -- The roster reports no zone for a moment after a loading screen; treat
+    -- that as a match rather than flapping the display and the warnings.
+    if not playerZone or playerZone == "" then return true end
+    return playerZone == zone
 end
 
 function PI:IsPlayerInSameZone(playerName)
-    if not playerName or playerName == "" then return false end
-    local myZone = GetZoneText() or ""
-    if playerName == PI:GetPlayerName() then return true end
-    for i = 1, GetNumGroupMembers() do
-        local name, _, _, _, _, _, zone, online = GetRaidRosterInfo(i)
-        if name and online then
-            -- Handle realm names
-            local shortName = strsplit("-", name)
-            if shortName == playerName or name == playerName then
-                return zone == myZone
-            end
-        end
-    end
-    return false
-end
-
-function PI:IsPlayerInSpecificZone(playerName, zone)
-    if not playerName or playerName == "" or not zone or zone == "" then return false end
-    if playerName == PI:GetPlayerName() then return (GetZoneText() or "") == zone end
-    for i = 1, GetNumGroupMembers() do
-        local unit = "raid"..i
-        if UnitExists(unit) and UnitIsPlayer(unit) and UnitIsConnected(unit) then
-            local name, realm = UnitName(unit)
-            if realm and realm ~= "" then
-                name = name.."-"..realm
-            end
-            if name == playerName then
-                local unitZone = GetZoneText(unit) or ""
-                return unitZone == zone
-            end
-        end
-    end
-    return false
+    return PI:IsPlayerInZone(playerName, GetZoneText() or "")
 end
 
 function PI:GetZoneOfPlayer(playerName)
-    if not playerName or playerName == "" then return nil end
-    -- Strip realm from playerName for consistency
-    local playerName = strsplit("-", playerName)
-    -- Check if it's the local player
-    if playerName == PI:GetPlayerName() then
-        return GetZoneText() or ""
-    end
-    -- Check raid members
-    for i = 1, GetNumGroupMembers() do
-        local name, _, _, _, _, _, zone, online = GetRaidRosterInfo(i)
-        if name and online then
-            local shortName = strsplit("-", name)
-            if shortName == playerName then
-                return zone
-            end
-        end
-    end
-    return nil
+    return memberZones[playerName]
+end
+
+function PI:GetRoleForName(name)
+    if not name then return nil end
+    return memberRoles[name]
 end
 
 PI.previousTarget = nil
@@ -335,75 +347,98 @@ PI.lastBroadcastedTarget = nil
 
 function PI:BroadcastAssignment(force)
     if not PI.playerIsPriest then return end
-    local player = PI:GetPlayerName()
-    local target = PowerInfusionAssignmentsDB.assignments[player]
+    if not IsInRaid() then return end
+    local target = PowerInfusionAssignmentsDB.assignments[PI:GetPlayerName()]
+    if not target or target == "" then return end
+    -- Only record the send after the guards above, or joining a raid with an
+    -- unchanged target would look already-broadcast and stay silent.
     if not force and target == PI.lastBroadcastedTarget then return end
     PI.lastBroadcastedTarget = target
-    if not target or target == "" then return end
-    if not IsInRaid() then return end
 
-    local payload = player..":"..target
+    -- Payload keeps the 1.4.x "Player:Target" shape and naming. We ignore the
+    -- name field on receipt (see OnAddonMessage) but 1.4.x clients key off it.
+    local payload = PI:ToWire(PI:GetPlayerName())..":"..PI:ToWire(target)
     -- Use RAID channel for more reliable communication in instances
     C_ChatInfo.SendAddonMessage(PI_MSG_PREFIX, payload, "RAID")
 end
 
 function PI:OnAddonMessage(prefix, message, channel, sender)
     if prefix ~= PI_MSG_PREFIX then return end
-    local fromPlayer, toTarget = strsplit(":", message)
-    if not fromPlayer or not toTarget then return end
-    -- store assignment from remote priest
-    PowerInfusionAssignmentsDB.assignments[fromPlayer] = toTarget
-    PI:UpdateAssignmentFrame()
+    if channel ~= "RAID" and channel ~= "INSTANCE_CHAT" then return end
+    -- Key the assignment off the sender the server reports rather than the
+    -- name in the payload, so nobody can post under another priest's name.
+    local from = PI:Qualify(sender)
+    if not from or from == PI:GetPlayerName() then return end
+    local _, target = strsplit(":", message)
+    if not target or target == "" then return end
+    -- An unqualified target is on the sender's realm, not ours
+    PowerInfusionAssignmentsDB.assignments[from] = PI:FromWire(target, RealmOf(from))
+    PI:RequestFrameUpdate()
 end
+
+local function ByNameLower(a, b) return strlower(a) < strlower(b) end
 
 function PI:ReportAssignmentsToChat(zone)
     if not zone or zone == "" then return end
     if not IsInRaid() then return end
-    
+
     -- Collect priests in the same zone as requester
     wipe(reusePriests)
     for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
-        if target and target ~= "" and PI:IsPlayerInSpecificZone(player, zone) then
+        if target and target ~= "" and PI:IsPlayerInZone(player, zone) then
             reusePriests[#reusePriests + 1] = player
         end
     end
-    
+
     if #reusePriests == 0 then return end
-    
-    table.sort(reusePriests, function(a, b) return strlower(a) < strlower(b) end)
-    local myName = PI:GetPlayerName()
-    if reusePriests[1] ~= myName then return end
+
+    -- Every priest running the addon hears the !pi, so elect one responder.
+    table.sort(reusePriests, ByNameLower)
+    if reusePriests[1] ~= PI:GetPlayerName() then return end
 
     local chatType = "INSTANCE_CHAT"
     -- Fall back to raid chat if not in instance group
     if not IsInGroup(LE_PARTY_CATEGORY_INSTANCE) then
         chatType = "RAID"
     end
-    
-    -- Collect assignments using reusable table
-    wipe(reuseLines)
-    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
-        if target and target ~= "" then
-            reuseLines[#reuseLines + 1] = player.." -> "..target
+
+    wipe(reuseReport)
+    for i = 1, #reusePriests do
+        local player = reusePriests[i]
+        local target = PowerInfusionAssignmentsDB.assignments[player]
+        reuseReport[#reuseReport + 1] = PI:ShortName(player).." -> "..PI:ShortName(target)
+    end
+
+    -- Pack several assignments per line. One message per priest is an easy
+    -- way to hit the chat throttle (and get disconnected) in a full raid.
+    local line = nil
+    for i = 1, #reuseReport do
+        local candidate = line and (line.." | "..reuseReport[i]) or ("[PI] "..reuseReport[i])
+        if #candidate > 240 then
+            SendChatMessage(line, chatType)
+            line = "[PI] "..reuseReport[i]
+        else
+            line = candidate
         end
     end
-    
-    if #reuseLines == 0 then
-        SendChatMessage("[PI] No PI assignments.", chatType)
-    else
-        SendChatMessage("[PI] Power Infusion Assignments:", chatType)
-        for i = 1, #reuseLines do
-            SendChatMessage(reuseLines[i], chatType)
-        end
+    if line then
+        SendChatMessage(line, chatType)
     end
 end
 
+local REPORT_COOLDOWN = 10
+
 function PI:OnChatMessage(message, sender)
     if PI.inCombat then return end
-    if strlower(strtrim(message)) == "!pi" then
-        local zone = PI:GetZoneOfPlayer(sender)
-        PI:ReportAssignmentsToChat(zone)
-    end
+    -- Raid chat is busy; bail on length before allocating the lowered/trimmed
+    -- copies, since every line in the raid comes through here.
+    if not message or #message > 8 then return end
+    if strlower(strtrim(message)) ~= "!pi" then return end
+    -- Anyone can type !pi, so rate limit it before it can spam raid chat.
+    local now = GetTime()
+    if PI.lastReportTime and (now - PI.lastReportTime) < REPORT_COOLDOWN then return end
+    PI.lastReportTime = now
+    PI:ReportAssignmentsToChat(PI:GetZoneOfPlayer(PI:Qualify(sender)))
 end
 
 function PI:SetError(message)
@@ -435,41 +470,28 @@ function PI:ClearError()
 end
 
 function PI:InitDB()
-    if not PowerInfusionAssignmentsDB then PowerInfusionAssignmentsDB = {} end
     if type(PowerInfusionAssignmentsDB) ~= "table" then PowerInfusionAssignmentsDB = {} end
     PowerInfusionAssignmentsDB.macroName = PowerInfusionAssignmentsDB.macroName or ""
-    PowerInfusionAssignmentsDB.assignments = PowerInfusionAssignmentsDB.assignments or {}
     PowerInfusionAssignmentsDB.framePos = PowerInfusionAssignmentsDB.framePos or { point = "CENTER", x = 0, y = -200 }
     PowerInfusionAssignmentsDB.piMode = PowerInfusionAssignmentsDB.piMode or 1  -- 1 = macro mode, 2 = mouseover/target mode
     PowerInfusionAssignmentsDB.testMode = false  -- Always reset test mode on login
+    -- Assignments are live raid state that every priest rebroadcasts within a
+    -- few seconds, so start empty rather than restoring last session's (or
+    -- last session's test mode) names.
+    PowerInfusionAssignmentsDB.assignments = {}
     PI.lastFrameText = nil
     PI.lastFrameErrorText = nil
-    PI.groupMembers = {}
     if PowerInfusionAssignmentsDB.hideInCombat == nil then PowerInfusionAssignmentsDB.hideInCombat = true end
     if PowerInfusionAssignmentsDB.enableWhispers == nil then PowerInfusionAssignmentsDB.enableWhispers = false end
     PowerInfusionAssignmentsDB.scale = PowerInfusionAssignmentsDB.scale or 1
     if PowerInfusionAssignmentsDB.showForNonPriest == nil then PowerInfusionAssignmentsDB.showForNonPriest = false end
     if PowerInfusionAssignmentsDB.lockFrame == nil then PowerInfusionAssignmentsDB.lockFrame = false end
+
+    local name, realm = UnitFullName("player")
+    myRealm = (realm and realm ~= "" and realm) or GetNormalizedRealmName() or ""
+    myFullName = PI:Qualify(name or UnitName("player"), myRealm)
     PI.playerIsPriest = select(2, UnitClass("player")) == "PRIEST"
 end
-
--- Fake test data for test mode
-local TEST_ASSIGNMENTS = {
-    ["Priest 2"] = "Roguestabber",
-    ["Priest 3"] = "Roguestabber",  -- Duplicate target to test warnings
-    ["Priest 4"] = "Tankwarrior",
-}
-
--- Class colors for fake test data (priest = white, others = class colors)
-local TEST_CLASS_COLORS = {
-    ["Priest 2"] = "|cffFFFFFF",      -- White (Priest)
-    ["Priest 3"] = "|cffFFFFFF",      -- White (Priest)
-    ["Priest 4"] = "|cffFFFFFF",      -- White (Priest)
-    ["Roguemaster"] = "|cffFFF468",   -- Rogue yellow
-    ["Tankwarrior"] = "|cffC69B6D",    -- Warrior brown
-    ["Firemage"] = "|cff3FC7EB",      -- Mage light blue
-    ["TestTarget"] = "|cffFFFFFF",    -- White (generic)
-}
 
 function PI:SetTestMode(enabled)
     PowerInfusionAssignmentsDB.testMode = enabled
@@ -487,11 +509,7 @@ function PI:SetTestMode(enabled)
         end
         -- Populate fake data for other priests
         for priest, target in pairs(TEST_ASSIGNMENTS) do
-            PowerInfusionAssignmentsDB.assignments[priest] = target
-        end
-        -- Add fake class colors to cache
-        for name, color in pairs(TEST_CLASS_COLORS) do
-            classColorCache[name] = color
+            PowerInfusionAssignmentsDB.assignments[PI:Qualify(priest)] = PI:Qualify(target)
         end
     else
         wipe(PowerInfusionAssignmentsDB.assignments)
@@ -502,14 +520,41 @@ function PI:SetTestMode(enabled)
             end
             PI.realAssignments = nil
         end
-        -- Remove fake class colors from cache
-        for name, _ in pairs(TEST_CLASS_COLORS) do
-            classColorCache[name] = nil
-        end
     end
+    PI:RefreshRoster()  -- adds or drops the fake class colours
     PI:UpdateAssignmentFrame()
     PI:UpdateAssignmentFrameVisibility()
     PI:UpdateTickerState()
+end
+
+-- Single entry point for "my PI target is now X": handles the whispers and
+-- writes the assignment. Both scan modes end up here.
+function PI:SetMyTarget(target)
+    if not target or target == "" then return end
+    local player = PI:GetPlayerName()
+    local oldTarget = PI.previousTarget
+
+    -- Whispers fire on a real change of target only
+    if oldTarget ~= target then
+        if PowerInfusionAssignmentsDB.enableWhispers then
+            -- Only guild members who are actually in the raid, and never ourselves
+            if oldTarget and oldTarget ~= "" and oldTarget ~= player
+                and PI:IsPlayerInGuild(oldTarget) and PI:IsPlayerInGroup(oldTarget) then
+                SendChatMessage("You no longer have PI", "WHISPER", nil, oldTarget)
+            end
+            if target ~= player and PI:IsPlayerInGuild(target) and PI:IsPlayerInGroup(target) then
+                SendChatMessage("PI set to you", "WHISPER", nil, target)
+            end
+        end
+        PI.previousTarget = target
+    end
+
+    -- Written unconditionally so our own row comes back if anything ever
+    -- clears it, without waiting for the macro to change
+    if PowerInfusionAssignmentsDB.assignments[player] ~= target then
+        PowerInfusionAssignmentsDB.assignments[player] = target
+        PI:RequestFrameUpdate()
+    end
 end
 
 function PI:ScanMacroAndSave()
@@ -528,63 +573,42 @@ function PI:ScanMacroAndSave()
     if not cachedMacroIndex then
         return false
     end
-    local body = select(3, GetMacroInfo(cachedMacroIndex))
-    if body ~= cachedMacroBody then
-        cachedMacroTarget = PI:ParseMacroForTarget(cachedMacroIndex)
-        cachedMacroBody = body
+    -- Macro indices shift when the player adds or deletes macros, so confirm
+    -- the cached index still points at the macro we were asked for.
+    local foundName, _, body = GetMacroInfo(cachedMacroIndex)
+    if foundName ~= macroName then
+        cachedMacroIndex = PI:FindMacroIndexByName(macroName)
+        if not cachedMacroIndex then return false end
+        foundName, _, body = GetMacroInfo(cachedMacroIndex)
     end
-    local target = cachedMacroTarget
-    if target then
-        local player = PI:GetPlayerName()
-        local oldTarget = PI.previousTarget
-        
-        -- Check if target changed
-        if oldTarget ~= target then
-            -- Whisper old target if whispers enabled, they're in guild, in raid group, and not yourself
-            if PowerInfusionAssignmentsDB.enableWhispers and oldTarget and oldTarget ~= "" and oldTarget ~= player and PI:IsPlayerInGuild(oldTarget) and PI:IsPlayerInGroup(oldTarget) then
-                SendChatMessage("You no longer have PI", "WHISPER", nil, oldTarget)
-            end
-            -- Whisper new target if whispers enabled, they're in guild, in raid group, and not yourself
-            if PowerInfusionAssignmentsDB.enableWhispers and target ~= player and PI:IsPlayerInGuild(target) and PI:IsPlayerInGroup(target) then
-                SendChatMessage("PI set to you", "WHISPER", nil, target)
-            end
-            PI.previousTarget = target
-        end
-        
-        PowerInfusionAssignmentsDB.assignments[player] = target
-        PI:UpdateAssignmentFrame()
-        return true
-    else
+    if body ~= cachedMacroBody then
+        cachedMacroBody = body
+        cachedMacroTarget = PI:ParseMacroForTarget(cachedMacroIndex)
+    end
+    if not cachedMacroTarget then
         return false
     end
+    PI:SetMyTarget(PI:ResolveName(cachedMacroTarget))
+    return true
 end
 
 -- Mode 2: Use the mouseover target set by PI_SetPITarget macro
 function PI:ScanMouseoverAndSave()
     local target = PI.mouseoverTarget
-    if not target or target == "" or target == PI.previousTarget then
+    if not target or target == "" then
         return false
     end
-    
-    local player = PI:GetPlayerName()
-    local oldTarget = PI.previousTarget
-    
-    -- Check if target changed
-    if oldTarget ~= target then
-        -- Whisper old target if whispers enabled, they're in guild, in raid group, and not yourself
-        if PowerInfusionAssignmentsDB.enableWhispers and oldTarget and oldTarget ~= "" and oldTarget ~= player and PI:IsPlayerInGuild(oldTarget) and PI:IsPlayerInGroup(oldTarget) then
-            SendChatMessage("You no longer have PI", "WHISPER", nil, oldTarget)
-        end
-        -- Whisper new target if whispers enabled, they're in guild, in raid group, and not yourself
-        if PowerInfusionAssignmentsDB.enableWhispers and target ~= player and PI:IsPlayerInGuild(target) and PI:IsPlayerInGroup(target) then
-            SendChatMessage("PI set to you", "WHISPER", nil, target)
-        end
-        PI.previousTarget = target
-    end
-    
-    PowerInfusionAssignmentsDB.assignments[player] = target
-    PI:UpdateAssignmentFrame()
+    PI:SetMyTarget(target)
     return true
+end
+
+local function FlashOnUpdate(self, elapsed)
+    self.flashElapsed = self.flashElapsed + elapsed
+    if self.flashElapsed >= 0.5 then
+        self.flashElapsed = 0
+        self.flashVisible = not self.flashVisible
+        self.warningIconTop:SetAlpha(self.flashVisible and 1 or 0.2)
+    end
 end
 
 function PI:CreateAssignmentFrame()
@@ -642,19 +666,10 @@ function PI:CreateAssignmentFrame()
     warningIconTop:Hide()
     f.warningIconTop = warningIconTop
 
-    -- Flash animation state
+    -- Flash animation state. The OnUpdate handler is only attached while the
+    -- icon is up, so the frame costs nothing per frame the rest of the time.
     f.flashElapsed = 0
     f.flashVisible = true
-    f:SetScript("OnUpdate", function(self, elapsed)
-        if not self.warningIconTop:IsShown() then return end
-        self.flashElapsed = self.flashElapsed + elapsed
-        if self.flashElapsed >= 0.5 then
-            self.flashElapsed = 0
-            self.flashVisible = not self.flashVisible
-            local alpha = self.flashVisible and 1 or 0.2
-            self.warningIconTop:SetAlpha(alpha)
-        end
-    end)
 
     f:Show()
     PI.frame = f
@@ -663,61 +678,42 @@ function PI:CreateAssignmentFrame()
 end
 
 function PI:CheckForDuplicateTargets()
-    local targetCounts = {}
-    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
+    wipe(reuseTargetCounts)
+    for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if target and target ~= "" then
-            targetCounts[target] = (targetCounts[target] or 0) + 1
-        end
-    end
-    for target, count in pairs(targetCounts) do
-        if count > 1 then
-            return true, target
+            if reuseTargetCounts[target] then return true, target end
+            reuseTargetCounts[target] = true
         end
     end
     return false, nil
 end
 
-function PI:CheckIfPITargetsInCorrectZone()
-    -- check if all priest's PI targets are in the same zone as the player.
-    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
-        if target and target ~= "" and not PI:IsPlayerInSameZone(target) then
-            return true, target
-        end
-    end
-    return false, nil
-end
-
-function PI:GetRoleForName(name)
-    if not name or name == "" then return nil end
-    -- Check player
-    if UnitName("player") == name then
-        return UnitGroupRolesAssigned("player")
-    end
-    -- Check raid
-    if IsInRaid() then
-        local num = GetNumGroupMembers()
-        for i = 1, num do
-            local unit = "raid"..i
-            if UnitExists(unit) and UnitIsConnected(unit) then
-                local uname = UnitName(unit)
-                if uname == name then
-                    return UnitGroupRolesAssigned(unit)
-                end
+-- Two separate problems, both of which mean a priest is going to waste a PI:
+-- the target has left the raid, or they're in a different zone to us.
+function PI:CheckTargetProblems()
+    if PowerInfusionAssignmentsDB.testMode then return false, false end
+    local missing, wrongZone = false, false
+    for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
+        if target and target ~= "" then
+            if not PI:IsPlayerInGroup(target) then
+                missing = true
+            elseif not PI:IsPlayerInSameZone(target) then
+                wrongZone = true
             end
         end
     end
-    return nil
+    return missing, wrongZone
 end
 
 function PI:CheckForRoleWarnings()
-    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
+    for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if target and target ~= "" then
             local role = PI:GetRoleForName(target)
             if role == "HEALER" or role == "TANK" then
                 return true
             end
             -- In test mode, simulate a role warning for Tankwarrior (tank)
-            if PowerInfusionAssignmentsDB.testMode and target == "Tankwarrior" then
+            if PowerInfusionAssignmentsDB.testMode and PI:ShortName(target) == "Tankwarrior" then
                 return true
             end
         end
@@ -745,56 +741,59 @@ function PI:UpdateAssignmentFrame()
     PI:CreateAssignmentFrame()
     wipe(reuseLines)
     local myName = PI:GetPlayerName()
-    
+
     -- First add the local player's assignment at the top (only if priest)
     if PI.playerIsPriest then
         local myTarget = PowerInfusionAssignmentsDB.assignments[myName]
-        local myColor = PI:GetClassColorForName(myName)
-        local coloredMe = PI:ColorText(myName, myColor)
+        local coloredMe = PI:ColorText(PI:ShortName(myName), PI:GetClassColorForName(myName))
         if myTarget and myTarget ~= "" then
-            local targetColor = PI:GetClassColorForName(myTarget)
-            local coloredTarget = PI:ColorText(myTarget, targetColor)
+            local coloredTarget = PI:ColorText(PI:ShortName(myTarget), PI:GetClassColorForName(myTarget))
             reuseLines[#reuseLines + 1] = coloredMe.." -> "..coloredTarget
         else
             reuseLines[#reuseLines + 1] = coloredMe.." -> (none)"
         end
     end
-    
+
     -- Then add other players' assignments
     for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if player ~= myName and target and target ~= "" and (PowerInfusionAssignmentsDB.testMode or PI:IsPlayerInSameZone(player)) then
-            local playerColor = PI:GetClassColorForName(player)
-            local coloredPlayer = PI:ColorText(player, playerColor)
-            local targetColor = PI:GetClassColorForName(target)
-            local coloredTarget = PI:ColorText(target, targetColor)
+            local coloredPlayer = PI:ColorText(PI:ShortName(player), PI:GetClassColorForName(player))
+            local coloredTarget = PI:ColorText(PI:ShortName(target), PI:GetClassColorForName(target))
             reuseLines[#reuseLines + 1] = coloredPlayer.." -> "..coloredTarget
         end
     end
-    
-    -- Check for duplicate targets, role warnings (PI assigned healer/tank), or PI targets in wrong zones
-    local _, instanceType, _, _ = GetInstanceInfo()
+
+    -- Check for duplicate targets, role warnings (PI assigned healer/tank), or
+    -- targets who left the raid / are in another zone
+    local _, instanceType = GetInstanceInfo()
     local hasDuplicates = false
     local hasRoleWarning = false
+    local targetMissing = false
     local targetsNotInZone = false
-    
+
     -- only run these checks if we're actually in a raid, no point showing them in a major city or outdoor zones
     if instanceType == "raid" then
-        hasDuplicates, duplicateTarget = PI:CheckForDuplicateTargets()
+        hasDuplicates = PI:CheckForDuplicateTargets()
         hasRoleWarning = PI:CheckForRoleWarnings()
-        targetsNotInZone = PI:CheckIfPITargetsInCorrectZone()
+        targetMissing, targetsNotInZone = PI:CheckTargetProblems()
     end
-    local errorLines = {}
+
+    wipe(reuseErrorLines)
     if hasDuplicates then
-        errorLines[#errorLines + 1] = "Duplicate PI targets!"
+        reuseErrorLines[#reuseErrorLines + 1] = "Duplicate PI targets!"
     end
     if hasRoleWarning then
-        errorLines[#errorLines + 1] = "PI assigned to HEALER or TANK!"
+        reuseErrorLines[#reuseErrorLines + 1] = "PI assigned to HEALER or TANK!"
+    end
+    if targetMissing then
+        reuseErrorLines[#reuseErrorLines + 1] = "One or more PI targets are not in the raid!"
     end
     if targetsNotInZone then
-        errorLines[#errorLines + 1] = "One or more PI targets are in a different zone!"
+        reuseErrorLines[#reuseErrorLines + 1] = "One or more PI targets are in a different zone!"
     end
+
     local newText = table.concat(reuseLines, "\n")
-    local newErrorText = table.concat(errorLines, "\n")
+    local newErrorText = table.concat(reuseErrorLines, "\n")
     if newText ~= PI.lastFrameText or newErrorText ~= PI.lastFrameErrorText then
         PI.frame.text:SetText(newText)
         PI.frame.errorText:SetText(newErrorText)
@@ -802,27 +801,198 @@ function PI:UpdateAssignmentFrame()
         PI.lastFrameText = newText
         PI.lastFrameErrorText = newErrorText
     end
-    
-    -- Show/hide warning icon
-    if hasDuplicates or hasRoleWarning or targetsNotInZone then
-        PI.frame.warningIconTop:Show()
+
+    -- Show/hide warning icon. Only touched on a transition so the flash keeps
+    -- its rhythm instead of restarting on every update.
+    local hasWarning = hasDuplicates or hasRoleWarning or targetMissing or targetsNotInZone
+    if hasWarning and not PI.frame.warningIconTop:IsShown() then
         PI.frame.flashElapsed = 0
         PI.frame.flashVisible = true
         PI.frame.warningIconTop:SetAlpha(1)
-    else
+        PI.frame.warningIconTop:Show()
+        PI.frame:SetScript("OnUpdate", FlashOnUpdate)
+    elseif not hasWarning and PI.frame.warningIconTop:IsShown() then
         PI.frame.warningIconTop:Hide()
+        PI.frame:SetScript("OnUpdate", nil)
     end
+end
+
+-- Palette, sizes and copy come from the sidebar handoff in
+-- .claude/design/design_handoff_pi_helper_sidebar/. Colours are that
+-- document's hex values as 0-1 RGB. The design is visual only: every control
+-- the old window had is still here, including both PI modes and the macro
+-- name validation, neither of which the handoff knew about.
+local C = {
+    frame        = {0.106, 0.086, 0.067},
+    rail         = {0.090, 0.071, 0.051},
+    bar          = {0.133, 0.106, 0.075},
+    railSel      = {0.141, 0.114, 0.078},
+    inset        = {0.063, 0.051, 0.035},
+    code         = {0.047, 0.039, 0.027},
+    btnFace      = {0.165, 0.129, 0.094},
+    btnHover     = {0.227, 0.176, 0.106},
+    primary      = {0.290, 0.227, 0.090},
+    primaryHover = {0.361, 0.282, 0.125},
+
+    edgeFrame    = {0.290, 0.227, 0.133},
+    edgeRegion   = {0.227, 0.176, 0.106},
+    edgeRow      = {0.133, 0.106, 0.075},
+    edgeCtrl     = {0.271, 0.208, 0.098},
+    edgeCode     = {0.239, 0.188, 0.094},
+    edgeDrop     = {0.427, 0.325, 0.125},
+    edgeHot      = {0.478, 0.361, 0.133},
+    edgeFocus    = {0.788, 0.573, 0.184},
+
+    trackBg      = {0.173, 0.141, 0.102},
+    trackEdge    = {0.098, 0.075, 0.035},
+    accent       = {0.851, 0.631, 0.231},
+    handle       = {0.949, 0.776, 0.427},
+    handleEdge   = {0.071, 0.063, 0.043},
+
+    title        = {0.949, 0.776, 0.427},
+    body         = {0.784, 0.733, 0.651},
+    field        = {0.941, 0.886, 0.769},
+    micro        = {0.690, 0.541, 0.239},
+    desc         = {0.490, 0.451, 0.384},
+    muted        = {0.431, 0.392, 0.333},
+    caption      = {0.545, 0.498, 0.427},
+    macroGreen   = {0.561, 0.812, 0.478},
+    onAccent     = {0.059, 0.051, 0.039},
+}
+
+local UI_FONT = "Fonts\\FRIZQT__.TTF"
+
+local RAIL_W, TITLE_H, BODY_H = 172, 46, 450
+local PANE_PAD_X, PANE_PAD_Y = 20, 18
+local WINDOW_W = 720
+local PANE_W = WINDOW_W - RAIL_W - PANE_PAD_X * 2
+local ROW_H = 44
+
+local function Fill(frame, color, alpha)
+    local t = frame:CreateTexture(nil, "BACKGROUND")
+    t:SetAllPoints()
+    t:SetColorTexture(color[1], color[2], color[3], alpha or 1)
+    return t
+end
+
+-- Flat single-pixel edges. SetBackdrop's edge files can't give the design's
+-- square corners and hairline borders, so the surfaces are built by hand.
+local function Edge(frame, side, color)
+    local t = frame:CreateTexture(nil, "BORDER")
+    t:SetColorTexture(color[1], color[2], color[3], 1)
+    if side == "TOP" then
+        t:SetPoint("TOPLEFT"); t:SetPoint("TOPRIGHT"); t:SetHeight(1)
+    elseif side == "BOTTOM" then
+        t:SetPoint("BOTTOMLEFT"); t:SetPoint("BOTTOMRIGHT"); t:SetHeight(1)
+    elseif side == "LEFT" then
+        t:SetPoint("TOPLEFT"); t:SetPoint("BOTTOMLEFT"); t:SetWidth(1)
+    else
+        t:SetPoint("TOPRIGHT"); t:SetPoint("BOTTOMRIGHT"); t:SetWidth(1)
+    end
+    return t
+end
+
+local function Outline(frame, color)
+    return {
+        Edge(frame, "TOP", color), Edge(frame, "BOTTOM", color),
+        Edge(frame, "LEFT", color), Edge(frame, "RIGHT", color),
+    }
+end
+
+local function SetOutlineColor(edges, color)
+    for i = 1, #edges do
+        edges[i]:SetColorTexture(color[1], color[2], color[3], 1)
+    end
+end
+
+-- SetFont's flags argument is not optional in retail; passing nil errors.
+local FONT_FLAGS = ""
+
+local function Label(parent, size, color, wrap)
+    local fs = parent:CreateFontString(nil, "OVERLAY")
+    fs:SetFont(UI_FONT, size, FONT_FLAGS)
+    fs:SetTextColor(color[1], color[2], color[3])
+    fs:SetJustifyH("LEFT")
+    fs:SetWordWrap(wrap and true or false)
+    return fs
+end
+
+-- Flat button: fill + outline + centred label, with a hover fill.
+local function FlatButton(parent, w, h, text, face, hover, border, textColor)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(w, h)
+    b.bg = Fill(b, face)
+    Outline(b, border)
+    b.label = Label(b, 14, textColor)
+    b.label:SetPoint("CENTER")
+    b.label:SetJustifyH("CENTER")
+    b.label:SetText(text)
+    b:SetScript("OnEnter", function(self)
+        self.bg:SetColorTexture(hover[1], hover[2], hover[3], 1)
+    end)
+    b:SetScript("OnLeave", function(self)
+        self.bg:SetColorTexture(face[1], face[2], face[3], 1)
+    end)
+    return b
+end
+
+-- Single-line text field on the design's inset surface.
+local function InsetEditBox(parent, w, h, fontSize, justify)
+    local box = CreateFrame("Frame", nil, parent)
+    box:SetSize(w, h)
+    Fill(box, C.inset)
+    box.edges = Outline(box, C.edgeCtrl)
+
+    local e = CreateFrame("EditBox", nil, box)
+    e:SetPoint("TOPLEFT", box, "TOPLEFT", 8, 0)
+    e:SetPoint("BOTTOMRIGHT", box, "BOTTOMRIGHT", -8, 0)
+    e:SetFont(UI_FONT, fontSize or 15, FONT_FLAGS)
+    e:SetTextColor(C.field[1], C.field[2], C.field[3])
+    e:SetJustifyH(justify or "LEFT")
+    e:SetAutoFocus(false)
+    e:SetScript("OnEditFocusGained", function() SetOutlineColor(box.edges, C.edgeFocus) end)
+    e:SetScript("OnEditFocusLost", function() SetOutlineColor(box.edges, C.edgeCtrl) end)
+    e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    e.container = box
+    return e, box
+end
+
+-- Read-only macro block. Kept selectable so Ctrl+C still works, exactly as
+-- the old window did: swallow typing, allow Ctrl+A / Ctrl+C, restore the text
+-- if anything slips through.
+local function MacroBlock(parent, w, h, text)
+    local block = CreateFrame("Frame", nil, parent)
+    block:SetSize(w, h)
+    Fill(block, C.code)
+    Outline(block, C.edgeCode)
+
+    local e = CreateFrame("EditBox", nil, block)
+    e:SetPoint("TOPLEFT", block, "TOPLEFT", 12, -10)
+    e:SetPoint("BOTTOMRIGHT", block, "BOTTOMRIGHT", -12, 10)
+    e:SetMultiLine(true)
+    e:SetFont(UI_FONT, 12, FONT_FLAGS)
+    e:SetTextColor(C.macroGreen[1], C.macroGreen[2], C.macroGreen[3])
+    e:SetAutoFocus(false)
+    e:SetText(text)
+    e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    e:SetScript("OnKeyDown", function(self, key)
+        if IsControlKeyDown() and (key == "C" or key == "A") then return end
+        self:SetPropagateKeyboardInput(false)
+    end)
+    e:SetScript("OnChar", function() end)
+    e:SetScript("OnTextChanged", function(self) self:SetText(text) end)
+    return e, block
 end
 
 function PI:CreateOptionsWindow()
     if PI.options then return end
-    local o = CreateFrame("Frame", "PIOptionsWindow", UIParent, "BackdropTemplate")
-    o:SetSize(400, 420)
-    o:SetScale(1.5)
+
+    local o = CreateFrame("Frame", "PIOptionsWindow", UIParent)
+    o:SetSize(WINDOW_W, TITLE_H + BODY_H)
     o:SetFrameStrata("DIALOG")
     o:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
-    o:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
-    o:SetBackdropColor(0,0,0,0.95)
+    Fill(o, C.frame)
+    Outline(o, C.edgeFrame)
     o:SetMovable(true)
     o:EnableMouse(true)
     o:RegisterForDrag("LeftButton")
@@ -831,490 +1001,577 @@ function PI:CreateOptionsWindow()
     o:SetClampedToScreen(true)
     o:Hide()
 
-    local close = CreateFrame("Button", nil, o, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", o, "TOPRIGHT", -2, -2)
-    close:SetScript("OnClick", function() o:Hide() end)
+    local UpdateBadges, UpdateModeVisibility, UpdateHintVisibility
 
-    -- Heading above tabs
-    local heading = o:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    heading:SetPoint("TOPLEFT", o, "TOPLEFT", 12, -10)
+    -- === TITLE BAR ===
+    local titleBar = CreateFrame("Frame", nil, o)
+    titleBar:SetPoint("TOPLEFT")
+    titleBar:SetPoint("TOPRIGHT")
+    titleBar:SetHeight(TITLE_H)
+    Fill(titleBar, C.bar)
+    Edge(titleBar, "BOTTOM", C.edgeRegion)
+
+    local heading = Label(titleBar, 17, C.title)
+    heading:SetPoint("LEFT", titleBar, "LEFT", 16, 0)
     heading:SetText("Power Infusion Assignment Helper")
 
-    -- Tab buttons
-    local function CreateTabButton(parent, id, text, xOffset)
-        local tab = CreateFrame("Button", "PIOptionsTab"..id, parent)
-        tab:SetSize(100, 28)
-        tab:SetPoint("TOPLEFT", parent, "TOPLEFT", xOffset, -28)
-        
-        tab.text = tab:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        tab.text:SetPoint("CENTER", tab, "CENTER", 0, 0)
-        tab.text:SetText(text)
-        
-        tab.bg = tab:CreateTexture(nil, "BACKGROUND")
-        tab.bg:SetAllPoints()
-        tab.bg:SetColorTexture(0.2, 0.2, 0.2, 0.8)
-        
-        tab.selected = false
-        tab.SetSelected = function(self, selected)
-            self.selected = selected
-            if selected then
-                self.bg:SetColorTexture(0.4, 0.4, 0.4, 1)
-                self.text:SetFontObject(GameFontHighlight)
-            else
-                self.bg:SetColorTexture(0.2, 0.2, 0.2, 0.8)
-                self.text:SetFontObject(GameFontNormal)
-            end
-        end
-        
-        return tab
+    -- The handoff asks for the game's existing red X here
+    local close = CreateFrame("Button", nil, titleBar, "UIPanelCloseButton")
+    close:SetPoint("RIGHT", titleBar, "RIGHT", -4, 0)
+    close:SetScript("OnClick", function() o:Hide() end)
+
+    -- === BODY ===
+    local body = CreateFrame("Frame", nil, o)
+    body:SetPoint("TOPLEFT", titleBar, "BOTTOMLEFT", 0, 0)
+    body:SetPoint("BOTTOMRIGHT", o, "BOTTOMRIGHT", 0, 0)
+
+    local rail = CreateFrame("Frame", nil, body)
+    rail:SetPoint("TOPLEFT")
+    rail:SetPoint("BOTTOMLEFT")
+    rail:SetWidth(RAIL_W)
+    Fill(rail, C.rail)
+    Edge(rail, "RIGHT", C.edgeRegion)
+
+    local paneArea = CreateFrame("Frame", nil, body)
+    paneArea:SetPoint("TOPLEFT", rail, "TOPRIGHT", 0, 0)
+    paneArea:SetPoint("BOTTOMRIGHT", body, "BOTTOMRIGHT", 0, 0)
+
+    local panes, navButtons = {}, {}
+
+    local function NewPane(key)
+        local p = CreateFrame("Frame", nil, paneArea)
+        p:SetPoint("TOPLEFT", paneArea, "TOPLEFT", PANE_PAD_X, -PANE_PAD_Y)
+        p:SetPoint("BOTTOMRIGHT", paneArea, "BOTTOMRIGHT", -PANE_PAD_X, PANE_PAD_Y)
+        p:Hide()
+        panes[key] = p
+        return p
     end
 
-    local tab1 = CreateTabButton(o, 1, "Configuration", 8)
-    local tab2 = CreateTabButton(o, 2, "FAQ", 112)
-    
-    -- Tab content containers
-    local tab1Content = CreateFrame("Frame", "PIOptionsTab1Content", o)
-    tab1Content:SetPoint("TOPLEFT", o, "TOPLEFT", 0, -56)
-    tab1Content:SetPoint("BOTTOMRIGHT", o, "BOTTOMRIGHT", 0, 0)
-    
-    local tab2Content = CreateFrame("Frame", "PIOptionsTab2Content", o)
-    tab2Content:SetPoint("TOPLEFT", o, "TOPLEFT", 0, -56)
-    tab2Content:SetPoint("BOTTOMRIGHT", o, "BOTTOMRIGHT", 0, 0)
-    tab2Content:Hide()
-    
-    -- Tab 2 FAQ content
-    local faqText = tab2Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    faqText:SetPoint("TOPLEFT", tab2Content, "TOPLEFT", 12, -10)
-    faqText:SetPoint("TOPRIGHT", tab2Content, "TOPRIGHT", -12, -10)
-    faqText:SetJustifyH("LEFT")
-    faqText:SetWordWrap(true)
-    faqText:SetSpacing(2)
-    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- warns you if multiple priests are PIing the same person\n- warns you if any priest has PI set to a tank or healer\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Configuration\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon for it to communicate properly")
-    
-    local function SelectTab(tabNum)
-        if tabNum == 1 then
-            tab1:SetSelected(true)
-            tab2:SetSelected(false)
-            tab1Content:Show()
-            tab2Content:Hide()
-        else
-            tab1:SetSelected(false)
-            tab2:SetSelected(true)
-            tab1Content:Hide()
-            tab2Content:Show()
+    local function SelectSection(key)
+        o.section = key
+        for i = 1, #navButtons do
+            local b = navButtons[i]
+            local on = (b.key == key)
+            b.selected = on
+            b.bg:SetShown(on)
+            b.mark:SetShown(on)
+            local col = on and C.title or C.body
+            b.label:SetTextColor(col[1], col[2], col[3])
+        end
+        for k, pane in pairs(panes) do
+            pane:SetShown(k == key)
         end
     end
-    
-    tab1:SetScript("OnClick", function() SelectTab(1) end)
-    tab2:SetScript("OnClick", function() SelectTab(2) end)
-    
-    -- Select tab 1 by default
-    SelectTab(1)
-    
-    o.tab1Content = tab1Content
-    o.tab2Content = tab2Content
-    o.SelectTab = SelectTab
 
-    -- === TAB 1 CONTENT (PI Options) ===
-    
-    -- PI Mode dropdown
-    local modeLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    modeLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -10)
-    modeLabel:SetText("Mode:")
+    local function CreateNavButton(index, key, text)
+        local b = CreateFrame("Button", nil, rail)
+        b:SetSize(RAIL_W, 40)
+        b:SetPoint("TOPLEFT", rail, "TOPLEFT", 0, -8 - (index - 1) * 40)
+
+        b.bg = Fill(b, C.railSel)
+        b.bg:Hide()
+        b.mark = b:CreateTexture(nil, "ARTWORK")
+        b.mark:SetPoint("TOPLEFT")
+        b.mark:SetPoint("BOTTOMLEFT")
+        b.mark:SetWidth(3)
+        b.mark:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 1)
+        b.mark:Hide()
+
+        b.label = Label(b, 15, C.body)
+        b.label:SetPoint("LEFT", b, "LEFT", 14, 0)
+        b.label:SetText(text)
+
+        b.badge = Label(b, 12, C.muted)
+        b.badge:SetPoint("RIGHT", b, "RIGHT", -14, 0)
+        b.badge:SetJustifyH("RIGHT")
+
+        b.key = key
+        b:SetScript("OnClick", function(self) SelectSection(self.key) end)
+        b:SetScript("OnEnter", function(self)
+            if self.selected then return end
+            self.bg:SetColorTexture(C.btnHover[1], C.btnHover[2], C.btnHover[3], 1)
+            self.bg:Show()
+        end)
+        b:SetScript("OnLeave", function(self)
+            if self.selected then return end
+            self.bg:Hide()
+            self.bg:SetColorTexture(C.railSel[1], C.railSel[2], C.railSel[3], 1)
+        end)
+
+        navButtons[index] = b
+        navButtons[key] = b
+        return b
+    end
+
+    CreateNavButton(1, "setup", "Setup")
+    CreateNavButton(2, "behavior", "Behavior")
+    CreateNavButton(3, "display", "Display")
+    CreateNavButton(4, "faq", "FAQ")
+
+    -- === SETUP PANE ===
+    local setup = NewPane("setup")
+
+    local modeMicro = Label(setup, 11, C.micro)
+    modeMicro:SetPoint("TOPLEFT", setup, "TOPLEFT", 0, 0)
+    modeMicro:SetText("MODE")
 
     local PI_MODE_OPTIONS = {
         [1] = "My PI target is set in a macro",
         [2] = "My PI target is *not* set in a macro",
     }
 
-    local modeDropdown = CreateFrame("Frame", "PI_ModeDropdown", tab1Content, "UIDropDownMenuTemplate")
-    modeDropdown:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 55, -4)
-    UIDropDownMenu_SetWidth(modeDropdown, 280)
+    -- Both modes are still here. UIDropDownMenu can't be flattened to this
+    -- design, so the picker is a plain button plus a two-row popup.
+    local modeButton = CreateFrame("Button", "PI_ModeDropdown", setup)
+    modeButton:SetSize(PANE_W, 34)
+    modeButton:SetPoint("TOPLEFT", modeMicro, "BOTTOMLEFT", 0, -10)
+    Fill(modeButton, C.inset)
+    Outline(modeButton, C.edgeDrop)
+    modeButton.label = Label(modeButton, 15, C.field)
+    modeButton.label:SetPoint("LEFT", modeButton, "LEFT", 10, 0)
+    local modeArrow = Label(modeButton, 12, C.field)
+    modeArrow:SetPoint("RIGHT", modeButton, "RIGHT", -10, 0)
+    modeArrow:SetText("v")
 
-    local function UpdateModeVisibility()
-        local mode = PowerInfusionAssignmentsDB.piMode or 1
-        if mode == 1 then
-            o.macroHintText:Show()
-            o.macroLabel:Show()
-            o.edit:Show()
-            o.exampleMacroLabel:Show()
-            o.exampleMacroScroll:Show()
-            o.exampleCopyMacroButton:Show()
-            o.mouseoverMacroLabel:Hide()
-            o.mouseoverMacroScroll:Hide()
-            o.copyMacroButton:Hide()
-        else
-            o.macroHintText:Hide()
-            o.macroLabel:Hide()
-            o.edit:Hide()
-            o.exampleMacroLabel:Hide()
-            o.exampleMacroScroll:Hide()
-            o.exampleCopyMacroButton:Hide()
-            o.mouseoverMacroLabel:Show()
-            o.mouseoverMacroScroll:Show()
-            o.copyMacroButton:Show()
-            -- Hide error text in mode 2
-            PI:ClearError()
-        end
-    end
-    o.UpdateModeVisibility = UpdateModeVisibility
+    local modeMenu = CreateFrame("Frame", nil, modeButton)
+    modeMenu:SetPoint("TOPLEFT", modeButton, "BOTTOMLEFT", 0, -1)
+    modeMenu:SetSize(PANE_W, 68)
+    modeMenu:SetFrameLevel(modeButton:GetFrameLevel() + 10)
+    Fill(modeMenu, C.inset)
+    Outline(modeMenu, C.edgeDrop)
+    modeMenu:Hide()
 
-    local function ModeDropdown_OnClick(self, arg1)
-        PowerInfusionAssignmentsDB.piMode = arg1
-        UIDropDownMenu_SetText(modeDropdown, PI_MODE_OPTIONS[arg1])
+    local function SetMode(mode)
+        PowerInfusionAssignmentsDB.piMode = mode
+        modeButton.label:SetText(PI_MODE_OPTIONS[mode])
+        modeMenu:Hide()
         UpdateModeVisibility()
-        o:UpdateHintVisibility()
+        UpdateHintVisibility()
+        UpdateBadges()
     end
 
-    local function ModeDropdown_Initialize(self, level)
-        local info = UIDropDownMenu_CreateInfo()
-        for i = 1, 2 do
-            info.text = PI_MODE_OPTIONS[i]
-            info.arg1 = i
-            info.func = ModeDropdown_OnClick
-            info.checked = (PowerInfusionAssignmentsDB.piMode == i)
-            info.fontObject = GameFontHighlightLarge
-            UIDropDownMenu_AddButton(info, level)
-        end
+    for i = 1, 2 do
+        local item = CreateFrame("Button", nil, modeMenu)
+        item:SetSize(PANE_W - 2, 33)
+        item:SetPoint("TOPLEFT", modeMenu, "TOPLEFT", 1, -1 - (i - 1) * 33)
+        item.bg = Fill(item, C.btnHover)
+        item.bg:Hide()
+        item.label = Label(item, 15, C.body)
+        item.label:SetPoint("LEFT", item, "LEFT", 9, 0)
+        item.label:SetText(PI_MODE_OPTIONS[i])
+        item:SetScript("OnClick", function() SetMode(i) end)
+        item:SetScript("OnEnter", function(self) self.bg:Show() end)
+        item:SetScript("OnLeave", function(self) self.bg:Hide() end)
     end
 
-    UIDropDownMenu_Initialize(modeDropdown, ModeDropdown_Initialize)
-    UIDropDownMenu_SetText(modeDropdown, PI_MODE_OPTIONS[PowerInfusionAssignmentsDB.piMode or 1])
+    modeButton:SetScript("OnClick", function()
+        modeMenu:SetShown(not modeMenu:IsShown())
+    end)
 
-    -- Macro name input (only visible in macro mode)
-    local macroHintText = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    macroHintText:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -40)
-    macroHintText:SetTextColor(0.2, 1, 0.2, 1)
+    -- Macro name row (mode 1)
+    local macroLabel = Label(setup, 15, C.body)
+    macroLabel:SetPoint("TOPLEFT", modeButton, "BOTTOMLEFT", 0, -16)
+    macroLabel:SetText("Macro name")
+
+    local edit, editBox = InsetEditBox(setup, 150, 30, 15)
+    editBox:SetPoint("LEFT", macroLabel, "RIGHT", 12, 0)
+    edit:SetText(PowerInfusionAssignmentsDB.macroName or "")
+
+    -- Green "get started" hint and the validation result share this line
+    local macroHintText = Label(setup, 13, {0.2, 1, 0.2})
+    macroHintText:SetPoint("TOPLEFT", macroLabel, "BOTTOMLEFT", 0, -10)
     macroHintText:SetText("Enter your macro name to get started")
 
-    local macroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    macroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -55)
-    macroLabel:SetText("What's the name of your PI macro?")
+    local errorText = Label(setup, 13, {1, 0.2, 0.2})
+    errorText:SetPoint("TOPLEFT", macroHintText, "BOTTOMLEFT", 0, -4)
+    errorText:SetText("")
+    errorText:Hide()
 
-    local edit = CreateFrame("EditBox", "PI_MacroNameEditBox", tab1Content, "InputBoxTemplate")
-    edit:SetSize(120, 24)
-    edit:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 202, -49)
-    edit:SetAutoFocus(false)
-    edit:SetText(PowerInfusionAssignmentsDB.macroName or "")
-    
-    -- Example macro section (only visible in macro mode)
-    local exampleMacroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    exampleMacroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -105)
-    exampleMacroLabel:SetText("Example macro (if you need to create one)")
-
-    local exampleMacroScroll = CreateFrame("ScrollFrame", "PI_ExampleMacroScroll", tab1Content, "UIPanelScrollFrameTemplate,BackdropTemplate")
-    exampleMacroScroll:SetSize(340, 60)
-    exampleMacroScroll:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -115)
-    exampleMacroScroll:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
-    exampleMacroScroll:SetBackdropColor(0, 0, 0, 1)
-    exampleMacroScroll:SetBackdropBorderColor(1, 0.82, 0, 1)
-
-    local exampleMacroEdit = CreateFrame("EditBox", "PI_ExampleMacroEditBox", exampleMacroScroll)
-    exampleMacroEdit:SetMultiLine(true)
-    exampleMacroEdit:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
-    exampleMacroEdit:SetTextColor(0, 1, 0, 1)
-    exampleMacroEdit:SetSize(300, 50)
-    exampleMacroEdit:SetAutoFocus(false)
-    exampleMacroEdit:EnableMouse(true)
-    exampleMacroEdit:EnableKeyboard(true)
-    exampleMacroEdit:SetText("/use [@mouseover,nodead,help]Power Infusion;[@YOUR_PI_TARGET_HERE,exists,nodead]Power Infusion;[@player]Power Infusion")
-    exampleMacroEdit:SetTextInsets(8, 8, 8, 8)
-    exampleMacroEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    exampleMacroEdit:SetScript("OnKeyDown", function(self, key)
-        -- Allow Ctrl+C and Ctrl+A, block everything else
-        if IsControlKeyDown() and (key == "C" or key == "A") then
-            return
-        end
-        self:SetPropagateKeyboardInput(false)
-    end)
-    exampleMacroEdit:SetScript("OnChar", function(self) end)
-    exampleMacroEdit:SetScript("OnTextChanged", function(self)
-        self:SetText("/use [@mouseover,nodead,help]Power Infusion;[@YOUR_PI_TARGET_HERE,exists,nodead]Power Infusion;[@player]Power Infusion")
-    end)
-    exampleMacroScroll:SetScrollChild(exampleMacroEdit)
-
-    local exampleCopyMacroButton = CreateFrame("Button", nil, tab1Content, "UIPanelButtonTemplate")
-    exampleCopyMacroButton:SetSize(200, 22)
-    exampleCopyMacroButton:SetPoint("TOPLEFT", exampleMacroScroll, "BOTTOMLEFT", 0, -9)
-    exampleCopyMacroButton:SetText("Select All (Ctrl+C to copy)")
-    exampleCopyMacroButton:SetScript("OnClick", function()
-        exampleMacroEdit:SetFocus()
-        exampleMacroEdit:HighlightText(0)
-    end)
-    
-    -- Save and validate macro name when text changes
     local function ValidateMacroName()
         local macroName = edit:GetText() or ""
         PowerInfusionAssignmentsDB.macroName = macroName
-        
+        UpdateBadges()
         if macroName == "" then
             PI:ClearError()
             return
         end
-        
-        local idx = PI:FindMacroIndexByName(macroName)
-        if not idx then
+        if not PI:FindMacroIndexByName(macroName) then
             PI:SetError("Macro not found: " .. macroName)
         else
-            PI:SetSuccess("Found macro: " .. macroName .. "")
+            PI:SetSuccess("Found macro: " .. macroName)
         end
     end
-    
+
     edit:SetScript("OnTextChanged", function(self, userInput)
         if userInput then
             PowerInfusionAssignmentsDB.macroName = self:GetText() or ""
-            o:UpdateHintVisibility()
+            UpdateHintVisibility()
+            UpdateBadges()
         end
     end)
     edit:SetScript("OnEnterPressed", function(self)
         self:ClearFocus()
         ValidateMacroName()
     end)
-    edit:SetScript("OnEscapePressed", function(self)
-        self:ClearFocus()
+
+    -- Example macro (mode 1)
+    local exampleMacroLabel = Label(setup, 14, C.caption)
+    exampleMacroLabel:SetPoint("TOPLEFT", errorText, "BOTTOMLEFT", 0, -14)
+    exampleMacroLabel:SetText("Example macro, if you need to create one")
+
+    local EXAMPLE_MACRO = "/use [@mouseover,nodead,help]Power Infusion;[@YOUR_PI_TARGET_HERE,exists,nodead]Power Infusion;[@player]Power Infusion"
+    local exampleMacroEdit, exampleMacroBlock = MacroBlock(setup, PANE_W, 76, EXAMPLE_MACRO)
+    exampleMacroBlock:SetPoint("TOPLEFT", exampleMacroLabel, "BOTTOMLEFT", 0, -8)
+
+    local exampleCopyMacroButton = FlatButton(setup, 200, 30, "Select all (Ctrl+C to copy)",
+        C.primary, C.primaryHover, C.edgeHot, C.title)
+    exampleCopyMacroButton:SetPoint("TOPLEFT", exampleMacroBlock, "BOTTOMLEFT", 0, -10)
+    exampleCopyMacroButton:SetScript("OnClick", function()
+        exampleMacroEdit:SetFocus()
+        exampleMacroEdit:HighlightText(0)
     end)
 
-    -- Mouseover mode: macro text area (only visible in mouseover mode)
-    local mouseoverMacroLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    mouseoverMacroLabel:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -40)
-    mouseoverMacroLabel:SetPoint("TOPRIGHT", tab1Content, "TOPRIGHT", -12, -40)
-    mouseoverMacroLabel:SetJustifyH("LEFT")
-    mouseoverMacroLabel:SetWordWrap(true)
+    -- Mouseover instructions and macro (mode 2)
+    local mouseoverMacroLabel = Label(setup, 14, C.body, true)
+    mouseoverMacroLabel:SetPoint("TOPLEFT", modeButton, "BOTTOMLEFT", 0, -16)
+    mouseoverMacroLabel:SetWidth(PANE_W)
     mouseoverMacroLabel:SetText("You can still communicate your PI target to the group by following these steps: \n\n1) Bind the below macro to a key\n2) While out of combat, mouseover your intended PI target, press the key.\n3) Your intended target is now communicated to your fellow priests!")
     mouseoverMacroLabel:Hide()
 
-    local mouseoverMacroScroll = CreateFrame("ScrollFrame", "PI_MouseoverMacroScroll", tab1Content, "UIPanelScrollFrameTemplate,BackdropTemplate")
-    mouseoverMacroScroll:SetSize(340, 40)
-    mouseoverMacroScroll:SetPoint("TOPLEFT", tab1Content, "TOPLEFT", 12, -122)
-    mouseoverMacroScroll:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
-    mouseoverMacroScroll:SetBackdropColor(0, 0, 0, 1)
-    mouseoverMacroScroll:SetBackdropBorderColor(1, 0.82, 0, 1)
-    mouseoverMacroScroll:Hide()
+    local mouseoverMacroEdit, mouseoverMacroBlock = MacroBlock(setup, PANE_W, 44, "/run PI_SetPITarget()")
+    mouseoverMacroBlock:SetPoint("TOPLEFT", mouseoverMacroLabel, "BOTTOMLEFT", 0, -14)
+    mouseoverMacroBlock:Hide()
 
-    local mouseoverMacroEdit = CreateFrame("EditBox", "PI_MouseoverMacroEditBox", mouseoverMacroScroll)
-    mouseoverMacroEdit:SetMultiLine(true)
-    mouseoverMacroEdit:SetFontObject(GameFontGreen)
-    mouseoverMacroEdit:SetSize(300, 30)
-    mouseoverMacroEdit:SetAutoFocus(false)
-    mouseoverMacroEdit:EnableMouse(true)
-    mouseoverMacroEdit:EnableKeyboard(true)
-    mouseoverMacroEdit:SetText("/run PI_SetPITarget()")
-    mouseoverMacroEdit:SetTextInsets(8, 8, 8, 8)
-    mouseoverMacroEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    mouseoverMacroEdit:SetScript("OnKeyDown", function(self, key)
-        -- Allow Ctrl+C and Ctrl+A, block everything else
-        if IsControlKeyDown() and (key == "C" or key == "A") then
-            return
-        end
-        self:SetPropagateKeyboardInput(false)
-    end)
-    mouseoverMacroEdit:SetScript("OnChar", function(self) end)
-    mouseoverMacroEdit:SetScript("OnTextChanged", function(self)
-        self:SetText("/run PI_SetPITarget()")
-    end)
-    mouseoverMacroScroll:SetScrollChild(mouseoverMacroEdit)
-
-    local copyMacroButton = CreateFrame("Button", nil, tab1Content, "UIPanelButtonTemplate")
-    copyMacroButton:SetSize(200, 22)
-    copyMacroButton:SetPoint("TOPLEFT", mouseoverMacroScroll, "BOTTOMLEFT", 0, -4)
-    copyMacroButton:SetText("Select All (Ctrl+C to copy)")
+    local copyMacroButton = FlatButton(setup, 200, 30, "Select all (Ctrl+C to copy)",
+        C.primary, C.primaryHover, C.edgeHot, C.title)
+    copyMacroButton:SetPoint("TOPLEFT", mouseoverMacroBlock, "BOTTOMLEFT", 0, -10)
     copyMacroButton:SetScript("OnClick", function()
         mouseoverMacroEdit:SetFocus()
         mouseoverMacroEdit:HighlightText(0)
     end)
     copyMacroButton:Hide()
 
-    o.mouseoverMacroLabel = mouseoverMacroLabel
-    o.mouseoverMacroScroll = mouseoverMacroScroll
-    o.mouseoverMacroEdit = mouseoverMacroEdit
-    o.copyMacroButton = copyMacroButton
+    -- === TOGGLE ROWS ===
+    local toggleRows = {}
 
-    local errorText = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    errorText:SetPoint("TOPLEFT", edit, "BOTTOMLEFT", 2, -6)
-    errorText:SetPoint("TOPRIGHT", edit, "BOTTOMRIGHT", -2, -6)
-    errorText:SetJustifyH("LEFT")
-    errorText:SetTextColor(1, 0.2, 0.2, 1)
-    errorText:SetText("")
-    errorText:Hide()
+    local function CreateToggleRow(parent, index, text, desc, get, set)
+        local row = CreateFrame("Button", nil, parent)
+        row:SetSize(PANE_W, ROW_H)
+        row:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -(index - 1) * ROW_H)
+        Edge(row, "BOTTOM", C.edgeRow)
 
-    -- Hide in combat checkbox
-    local hideInCombatCheck = CreateFrame("CheckButton", "PI_HideInCombatCheckbox", tab1Content, "UICheckButtonTemplate")
-    hideInCombatCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 130)
-    hideInCombatCheck:SetSize(24, 24)
-    hideInCombatCheck:SetChecked(PowerInfusionAssignmentsDB.hideInCombat)
-    hideInCombatCheck:SetScript("OnClick", function(self)
-        PowerInfusionAssignmentsDB.hideInCombat = self:GetChecked()
-        PI:UpdateAssignmentFrameVisibility()
-    end)
+        local box = CreateFrame("Frame", nil, row)
+        box:SetSize(16, 16)
+        box:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -11)
+        row.boxFill = Fill(box, C.inset)
+        row.boxEdges = Outline(box, C.edgeCtrl)
+        row.check = box:CreateTexture(nil, "OVERLAY")
+        row.check:SetPoint("CENTER")
+        row.check:SetSize(16, 16)
+        row.check:SetTexture("Interface\\Buttons\\UI-CheckBox-Check")
+        row.check:SetVertexColor(C.onAccent[1], C.onAccent[2], C.onAccent[3])
+        row.check:Hide()
 
-    local hideInCombatLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    hideInCombatLabel:SetPoint("LEFT", hideInCombatCheck, "RIGHT", 2, 0)
-    hideInCombatLabel:SetText("Hide PI assignments in combat")
+        row.label = Label(row, 15, C.body)
+        row.label:SetPoint("TOPLEFT", row, "TOPLEFT", 28, -9)
+        row.label:SetText(text)
 
-    -- Show for non priests
-    local showForNonPriest = CreateFrame("CheckButton", "PI_ShowForNonPriestCheckbox", tab1Content, "UICheckButtonTemplate")
-    showForNonPriest:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 110)
-    showForNonPriest:SetSize(24, 24)
-    showForNonPriest:SetChecked(PowerInfusionAssignmentsDB.showForNonPriest or false)
-    showForNonPriest:SetScript("OnClick", function(self)
-        PowerInfusionAssignmentsDB.showForNonPriest = self:GetChecked()
-        PI:UpdateAssignmentFrameVisibility()
-        if PowerInfusionAssignmentsDB.showForNonPriest then
-            StartScanTicker()
-        else
-            StopScanTicker()
+        row.desc = Label(row, 13, C.desc, true)
+        row.desc:SetPoint("TOPLEFT", row.label, "BOTTOMLEFT", 0, -3)
+        row.desc:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+        row.desc:SetText(desc)
+
+        row.Refresh = function(self)
+            local on = get() and true or false
+            self.check:SetShown(on)
+            if on then
+                self.boxFill:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 1)
+                SetOutlineColor(self.boxEdges, C.edgeHot)
+                self.label:SetTextColor(C.title[1], C.title[2], C.title[3])
+            else
+                self.boxFill:SetColorTexture(C.inset[1], C.inset[2], C.inset[3], 1)
+                SetOutlineColor(self.boxEdges, C.edgeCtrl)
+                self.label:SetTextColor(C.body[1], C.body[2], C.body[3])
+            end
         end
-    end)
+        row:SetScript("OnClick", function(self)
+            set(not get())
+            self:Refresh()
+            UpdateBadges()
+        end)
 
-    local showForNonPriestLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    showForNonPriestLabel:SetPoint("LEFT", showForNonPriest, "RIGHT", 2, 0)
-    showForNonPriestLabel:SetText("Show PI assignments even if I'm not a priest")
+        toggleRows[#toggleRows + 1] = row
+        return row
+    end
 
-    -- Enable whispers checkbox
-    local enableWhispersCheck = CreateFrame("CheckButton", "PI_EnableWhispersCheckbox", tab1Content, "UICheckButtonTemplate")
-    enableWhispersCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 90)
-    enableWhispersCheck:SetSize(24, 24)
-    enableWhispersCheck:SetChecked(PowerInfusionAssignmentsDB.enableWhispers)
-    enableWhispersCheck:SetScript("OnClick", function(self)
-        PowerInfusionAssignmentsDB.enableWhispers = self:GetChecked()
-    end)
+    -- === BEHAVIOR PANE ===
+    local behavior = NewPane("behavior")
 
-    local enableWhispersLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    enableWhispersLabel:SetPoint("LEFT", enableWhispersCheck, "RIGHT", 2, 0)
-    enableWhispersLabel:SetText("Enable whispers (guild only)")
+    CreateToggleRow(behavior, 1, "Hide PI assignments in combat",
+        "The assignment window is hidden while you are in combat.",
+        function() return PowerInfusionAssignmentsDB.hideInCombat end,
+        function(v)
+            PowerInfusionAssignmentsDB.hideInCombat = v
+            PI:UpdateAssignmentFrameVisibility()
+        end)
 
-    -- Info icon for whispers
-    local whispersInfoIcon = CreateFrame("Frame", nil, tab1Content)
+    CreateToggleRow(behavior, 2, "Show PI assignments even if I'm not a priest",
+        "Shows the window on non-priest characters, for raid leads tracking PI.",
+        function() return PowerInfusionAssignmentsDB.showForNonPriest end,
+        function(v)
+            PowerInfusionAssignmentsDB.showForNonPriest = v
+            PI:UpdateAssignmentFrameVisibility()
+            PI:UpdateTickerState()
+        end)
+
+    local whispersRow = CreateToggleRow(behavior, 3, "Enable whispers (guild only)",
+        "Whispers your old and new target whenever your PI target changes.",
+        function() return PowerInfusionAssignmentsDB.enableWhispers end,
+        function(v) PowerInfusionAssignmentsDB.enableWhispers = v end)
+
+    local whispersInfoIcon = CreateFrame("Frame", nil, whispersRow)
     whispersInfoIcon:SetSize(16, 16)
-    whispersInfoIcon:SetPoint("LEFT", enableWhispersLabel, "RIGHT", 4, 0)
-    
+    whispersInfoIcon:SetPoint("LEFT", whispersRow.label, "RIGHT", 6, 0)
     local whispersInfoTexture = whispersInfoIcon:CreateTexture(nil, "ARTWORK")
     whispersInfoTexture:SetAllPoints()
     whispersInfoTexture:SetTexture("Interface/FriendsFrame/InformationIcon")
-    
     whispersInfoIcon:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:AddLine("Enable Whispers", 1, 1, 1)
         GameTooltip:AddLine("When you change your PI target, notify old and new targets. Only works for guild members.", nil, nil, nil, true)
         GameTooltip:Show()
     end)
-    whispersInfoIcon:SetScript("OnLeave", function(self)
-        GameTooltip:Hide()
-    end)
+    whispersInfoIcon:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    -- Test mode checkbox
-    local testModeCheck = CreateFrame("CheckButton", "PI_TestModeCheckbox", tab1Content, "UICheckButtonTemplate")
-    testModeCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 70)
-    testModeCheck:SetSize(24, 24)
-    testModeCheck:SetChecked(PowerInfusionAssignmentsDB.testMode or false)
-    testModeCheck:SetScript("OnClick", function(self)
-        PI:SetTestMode(self:GetChecked())
-    end)
+    -- === DISPLAY PANE ===
+    local display = NewPane("display")
 
-    local testModeLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    testModeLabel:SetPoint("LEFT", testModeCheck, "RIGHT", 2, 0)
-    testModeLabel:SetText("Test mode (show fake data)")
+    CreateToggleRow(display, 1, "Test mode (show fake data)",
+        "Fills the window with sample assignments so you can position it. Off on login.",
+        function() return PowerInfusionAssignmentsDB.testMode end,
+        function(v) PI:SetTestMode(v) end)
 
-    -- Lock frame checkbox
-    local lockFrameCheck = CreateFrame("CheckButton", "PI_LockFrameCheckbox", tab1Content, "UICheckButtonTemplate")
-    lockFrameCheck:SetPoint("BOTTOMLEFT", tab1Content, "BOTTOMLEFT", 8, 50)
-    lockFrameCheck:SetSize(24, 24)
-    lockFrameCheck:SetChecked(PowerInfusionAssignmentsDB.lockFrame or false)
-    lockFrameCheck:SetScript("OnClick", function(self)
-        PowerInfusionAssignmentsDB.lockFrame = self:GetChecked()
-        PI:UpdateFrameLock()
-    end)
+    CreateToggleRow(display, 2, "Lock frame",
+        "Stops the assignment window being dragged.",
+        function() return PowerInfusionAssignmentsDB.lockFrame end,
+        function(v)
+            PowerInfusionAssignmentsDB.lockFrame = v
+            PI:UpdateFrameLock()
+        end)
 
-    local lockFrameLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    lockFrameLabel:SetPoint("LEFT", lockFrameCheck, "RIGHT", 2, 0)
-    lockFrameLabel:SetText("Lock frame")
+    -- === FAQ PANE ===
+    local faq = NewPane("faq")
+    local faqText = Label(faq, 13, C.body, true)
+    faqText:SetPoint("TOPLEFT", faq, "TOPLEFT", 0, 0)
+    faqText:SetPoint("TOPRIGHT", faq, "TOPRIGHT", 0, 0)
+    faqText:SetSpacing(3)
+    faqText:SetText("|cFFFFD100Q: What does this addon do?|r\n- shows PI targets for yourself + other priests in a movable window\n- warns you if multiple priests are PIing the same person\n- warns you if any priest has PI set to a tank or healer\n- lets your raid team run !pi command to check who PIs are set to\n\n|cFFFFD100Q: How do I set up the addon|r\n- Follow instructions in the \"Setup\" tab\n\n|cFFFFD100Q: Restrictions|r\n- only works in raid groups\n- all of your priests will need to run the addon for it to communicate properly")
 
-    -- Scale slider
-    local scaleSlider = CreateFrame("Slider", "PI_ScaleSlider", tab1Content, "OptionsSliderTemplate")
-    scaleSlider:SetPoint("BOTTOM", tab1Content, "BOTTOM", 0, 18)
-    scaleSlider:SetMinMaxValues(0.7, 2.0)
-    scaleSlider:SetValueStep(0.05)
-    scaleSlider:SetValue(PowerInfusionAssignmentsDB.scale or 1)
-    -- _G["PI_ScaleSliderLow"]:SetText("0.7")
-    -- _G["PI_ScaleSliderHigh"]:SetText("2")
+    -- === SCALE (in the Display pane) ===
+    -- The handoff put this in a footer visible in every section; it lives in
+    -- Display instead, under the two toggle rows.
+    local scaleRow = CreateFrame("Frame", nil, display)
+    scaleRow:SetPoint("TOPLEFT", display, "TOPLEFT", 0, -(2 * ROW_H) - 20)
+    scaleRow:SetSize(PANE_W, 26)
 
-    local scaleLabel = tab1Content:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    scaleLabel:SetPoint("RIGHT", scaleSlider, "LEFT", -8, 0)
+    local scaleLabel = Label(scaleRow, 15, C.body)
+    scaleLabel:SetPoint("LEFT", scaleRow, "LEFT", 0, 0)
     scaleLabel:SetText("Scale")
 
-    local scaleInput = CreateFrame("EditBox", "PI_ScaleInput", tab1Content, "InputBoxTemplate")
-    scaleInput:SetAutoFocus(false)
-    scaleInput:SetPoint("LEFT", scaleSlider, "RIGHT", 8, 0)
-    scaleInput:SetSize(50, 20)
-    scaleInput:SetText(string.format("%.2f", PowerInfusionAssignmentsDB.scale or 1))
-    scaleInput:SetScript("OnTextChanged", function(self)
+    local SCALE_MIN, SCALE_MAX, SCALE_STEP = 0.7, 2.0, 0.05
+    local applyingScale = false
+
+    local stepper = CreateFrame("Frame", nil, scaleRow)
+    stepper:SetSize(104, 26)
+    stepper:SetPoint("RIGHT", scaleRow, "RIGHT", 0, 0)
+    Fill(stepper, C.inset)
+    Outline(stepper, C.edgeCtrl)
+
+    -- A real Slider skinned down to the design's 4px bar, so drag handling and
+    -- step snapping come free.
+    local scaleSlider = CreateFrame("Slider", "PI_ScaleSlider", scaleRow)
+    scaleSlider:SetPoint("LEFT", scaleLabel, "RIGHT", 14, 0)
+    scaleSlider:SetPoint("RIGHT", stepper, "LEFT", -14, 0)
+    scaleSlider:SetHeight(20)
+    scaleSlider:SetOrientation("HORIZONTAL")
+    scaleSlider:SetMinMaxValues(SCALE_MIN, SCALE_MAX)
+    scaleSlider:SetValueStep(SCALE_STEP)
+    scaleSlider:SetObeyStepOnDrag(true)
+
+    local trackEdge = scaleSlider:CreateTexture(nil, "BACKGROUND")
+    trackEdge:SetPoint("LEFT")
+    trackEdge:SetPoint("RIGHT")
+    trackEdge:SetHeight(6)
+    trackEdge:SetColorTexture(C.trackEdge[1], C.trackEdge[2], C.trackEdge[3], 1)
+
+    local trackBg = scaleSlider:CreateTexture(nil, "BORDER")
+    trackBg:SetPoint("LEFT", trackEdge, "LEFT", 1, 0)
+    trackBg:SetPoint("RIGHT", trackEdge, "RIGHT", -1, 0)
+    trackBg:SetHeight(4)
+    trackBg:SetColorTexture(C.trackBg[1], C.trackBg[2], C.trackBg[3], 1)
+
+    local thumb = scaleSlider:CreateTexture(nil, "OVERLAY")
+    thumb:SetSize(9, 18)
+    thumb:SetColorTexture(C.handle[1], C.handle[2], C.handle[3], 1)
+    scaleSlider:SetThumbTexture(thumb)
+
+    -- Anchored to the thumb so the fill follows the value with no OnUpdate
+    local trackFill = scaleSlider:CreateTexture(nil, "ARTWORK")
+    trackFill:SetPoint("LEFT", trackBg, "LEFT", 0, 0)
+    trackFill:SetPoint("RIGHT", thumb, "CENTER", 0, 0)
+    trackFill:SetHeight(4)
+    trackFill:SetColorTexture(C.accent[1], C.accent[2], C.accent[3], 1)
+
+    -- The readout is an EditBox, not a label, so the old window's ability to
+    -- type an exact scale survives the redesign.
+    local scaleInput, scaleInputBox = InsetEditBox(stepper, 52, 24, 15, "CENTER")
+    scaleInputBox:SetPoint("CENTER", stepper, "CENTER", 0, 0)
+    scaleInput:SetTextColor(C.title[1], C.title[2], C.title[3])
+    _G["PI_ScaleInput"] = scaleInput
+
+    local function ApplyScale(value, fromInput)
+        if applyingScale then return end
+        value = tonumber(value)
+        if not value then return end
+        if value < SCALE_MIN then value = SCALE_MIN end
+        if value > SCALE_MAX then value = SCALE_MAX end
+        -- Snap to the step grid, then round off the float noise that leaves
+        -- behind, so the saved variable holds 0.70 rather than 0.7000000000001
+        value = math.floor(value / SCALE_STEP + 0.5) * SCALE_STEP
+        value = math.floor(value * 100 + 0.5) / 100
+        applyingScale = true
+        PowerInfusionAssignmentsDB.scale = value
+        if PI.frame then PI.frame:SetScale(value) end
+        scaleSlider:SetValue(value)
+        if not fromInput then
+            scaleInput:SetText(string.format("%.2f", value))
+        end
+        applyingScale = false
+    end
+
+    scaleSlider:SetScript("OnValueChanged", function(_, value) ApplyScale(value) end)
+
+    scaleInput:SetScript("OnTextChanged", function(self, userInput)
+        if not userInput then return end
         local text = self:GetText()
         local filtered = text:gsub("[^0-9.]", "")
-        if filtered ~= text then
-            self:SetText(filtered)
-        end
+        if filtered ~= text then self:SetText(filtered) end
     end)
     scaleInput:SetScript("OnEnterPressed", function(self)
         local value = tonumber(self:GetText())
-        if value and value >= 0.0 and value <= 2.0 then
-            PowerInfusionAssignmentsDB.scale = value
-            scaleSlider:SetValue(value)
-            if PI.frame then PI.frame:SetScale(value) end
-        else
-            self:SetText(string.format("%.2f", PowerInfusionAssignmentsDB.scale or 1))
+        if value then
+            ApplyScale(value, true)
         end
+        self:SetText(string.format("%.2f", PowerInfusionAssignmentsDB.scale or 1))
         self:ClearFocus()
     end)
 
-    scaleSlider:SetScript("OnValueChanged", function(self, value)
-        PowerInfusionAssignmentsDB.scale = value
-        scaleInput:SetText(string.format("%.2f", value))
-        if PI.frame then PI.frame:SetScale(value) end
+    local minusButton = FlatButton(stepper, 26, 26, "-", C.btnFace, C.btnHover, C.edgeCtrl, C.field)
+    minusButton:SetPoint("LEFT", stepper, "LEFT", 0, 0)
+    minusButton:SetScript("OnClick", function()
+        ApplyScale((PowerInfusionAssignmentsDB.scale or 1) - SCALE_STEP)
+    end)
+
+    local plusButton = FlatButton(stepper, 26, 26, "+", C.btnFace, C.btnHover, C.edgeCtrl, C.field)
+    plusButton:SetPoint("RIGHT", stepper, "RIGHT", 0, 0)
+    plusButton:SetScript("OnClick", function()
+        ApplyScale((PowerInfusionAssignmentsDB.scale or 1) + SCALE_STEP)
+    end)
+
+    -- === DERIVED STATE ===
+    UpdateBadges = function()
+        local mode = PowerInfusionAssignmentsDB.piMode or 1
+        navButtons.setup.badge:SetText(mode == 1 and (PowerInfusionAssignmentsDB.macroName or "") or "")
+
+        local b = 0
+        if PowerInfusionAssignmentsDB.hideInCombat then b = b + 1 end
+        if PowerInfusionAssignmentsDB.showForNonPriest then b = b + 1 end
+        if PowerInfusionAssignmentsDB.enableWhispers then b = b + 1 end
+        navButtons.behavior.badge:SetText(b.."/3")
+
+        local d = 0
+        if PowerInfusionAssignmentsDB.testMode then d = d + 1 end
+        if PowerInfusionAssignmentsDB.lockFrame then d = d + 1 end
+        navButtons.display.badge:SetText(d.."/2")
+    end
+
+    UpdateModeVisibility = function()
+        local mode = PowerInfusionAssignmentsDB.piMode or 1
+        local macroMode = (mode == 1)
+        macroLabel:SetShown(macroMode)
+        editBox:SetShown(macroMode)
+        exampleMacroLabel:SetShown(macroMode)
+        exampleMacroBlock:SetShown(macroMode)
+        exampleCopyMacroButton:SetShown(macroMode)
+        mouseoverMacroLabel:SetShown(not macroMode)
+        mouseoverMacroBlock:SetShown(not macroMode)
+        copyMacroButton:SetShown(not macroMode)
+        if macroMode then
+            UpdateHintVisibility()
+        else
+            macroHintText:Hide()
+            PI:ClearError()
+        end
+    end
+
+    UpdateHintVisibility = function()
+        local mode = PowerInfusionAssignmentsDB.piMode or 1
+        local macroName = PowerInfusionAssignmentsDB.macroName or ""
+        macroHintText:SetShown(mode == 1 and macroName == "")
+    end
+
+    local function RefreshToggles()
+        for i = 1, #toggleRows do toggleRows[i]:Refresh() end
+    end
+
+    o:SetScript("OnShow", function(self)
+        modeMenu:Hide()
+        RefreshToggles()
+        UpdateBadges()
+        UpdateModeVisibility()
+        if self.edit then self.edit:ClearFocus() end
+        if self.exampleMacroEdit then self.exampleMacroEdit:ClearFocus() end
+        if self.mouseoverMacroEdit then self.mouseoverMacroEdit:ClearFocus() end
+        scaleInput:ClearFocus()
     end)
 
     o.macroHintText = macroHintText
     o.macroLabel = macroLabel
     o.edit = edit
+    o.editBox = editBox
+    o.exampleMacroBlock = exampleMacroBlock
+    o.mouseoverMacroBlock = mouseoverMacroBlock
+    o.toggleRows = toggleRows
+    o.SetMode = SetMode
     o.exampleMacroLabel = exampleMacroLabel
-    o.exampleMacroScroll = exampleMacroScroll
     o.exampleMacroEdit = exampleMacroEdit
     o.exampleCopyMacroButton = exampleCopyMacroButton
+    o.mouseoverMacroLabel = mouseoverMacroLabel
+    o.mouseoverMacroEdit = mouseoverMacroEdit
+    o.copyMacroButton = copyMacroButton
     o.errorText = errorText
-    o.modeDropdown = modeDropdown
-    
-    -- Function to update hint visibility based on mode and macro name
-    local function UpdateHintVisibility()
-        local mode = PowerInfusionAssignmentsDB.piMode or 1
-        local macroName = PowerInfusionAssignmentsDB.macroName or ""
-        if mode == 1 and macroName == "" then
-            o.macroHintText:Show()
-        else
-            o.macroHintText:Hide()
-        end
-    end
+    o.faqText = faqText
+    o.modeDropdown = modeButton
+    o.SelectSection = SelectSection
+    o.UpdateModeVisibility = UpdateModeVisibility
     o.UpdateHintVisibility = UpdateHintVisibility
-    
-    -- Clear focus from edit boxes when window is shown
-    o:SetScript("OnShow", function(self)
-        if self.edit then self.edit:ClearFocus() end
-        if self.exampleMacroEdit then self.exampleMacroEdit:ClearFocus() end
-        if self.mouseoverMacroEdit then self.mouseoverMacroEdit:ClearFocus() end
-        local scaleInput = _G["PI_ScaleInput"]
-        if scaleInput then scaleInput:ClearFocus() end
-    end)
-    
-    -- Clear focus from all edit boxes after creation
-    if o.edit then o.edit:ClearFocus() end
-    if o.exampleMacroEdit then o.exampleMacroEdit:ClearFocus() end
-    if o.mouseoverMacroEdit then o.mouseoverMacroEdit:ClearFocus() end
-    local scaleInput = _G["PI_ScaleInput"]
-    if scaleInput then scaleInput:ClearFocus() end
-    
+    o.UpdateBadges = UpdateBadges
+    o.RefreshToggles = RefreshToggles
+
     PI.options = o
 
-    -- Initialize visibility based on current mode
+    modeButton.label:SetText(PI_MODE_OPTIONS[PowerInfusionAssignmentsDB.piMode or 1])
+    scaleSlider:SetValue(PowerInfusionAssignmentsDB.scale or 1)
+    scaleInput:SetText(string.format("%.2f", PowerInfusionAssignmentsDB.scale or 1))
+    edit:ClearFocus()
+    exampleMacroEdit:ClearFocus()
+    mouseoverMacroEdit:ClearFocus()
+    scaleInput:ClearFocus()
+
+    RefreshToggles()
+    UpdateBadges()
     UpdateModeVisibility()
-    UpdateHintVisibility()
+    SelectSection("setup")
 end
 
 SLASH_POWERINFUSION1 = "/pi"
@@ -1367,45 +1624,23 @@ end
 function PI:CleanupStaleAssignments()
     -- Don't cleanup in test mode, we want to keep the fake data
     if PowerInfusionAssignmentsDB.testMode then return end
-   
+
     local myName = PI:GetPlayerName()
-    local toRemove = {}
-    
-    for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
-        -- Don't remove our own assignment, only remote players who left the group or are offline/not in same zone
-        if player ~= myName then
-            local shouldRemove = false
-            if not PI:IsPlayerInGroup(player)then
-                shouldRemove = true
-            elseif not PI:IsPlayerInSameZone(player) then
-                shouldRemove = true
-            end
-            if shouldRemove then
-                table.insert(toRemove, player)
-            end
+    local changed = false
+    -- Only drop priests who actually left the group. Out-of-zone ones are
+    -- filtered at display time instead, so a loading screen can't clear the
+    -- list and force everyone to rebroadcast.
+    for player in pairs(PowerInfusionAssignmentsDB.assignments) do
+        if player ~= myName and not PI:IsPlayerInGroup(player) then
+            PowerInfusionAssignmentsDB.assignments[player] = nil
+            changed = true
         end
     end
-    
-    for _, player in ipairs(toRemove) do
-        PowerInfusionAssignmentsDB.assignments[player] = nil
-    end
-    
-    if #toRemove > 0 then
-        PI:UpdateAssignmentFrame()
+
+    if changed then
+        PI:RequestFrameUpdate()
     end
 end
-
-local f = CreateFrame("Frame")
-f:RegisterEvent("PLAYER_LOGIN")
-f:RegisterEvent("PLAYER_REGEN_DISABLED")
-f:RegisterEvent("PLAYER_REGEN_ENABLED")
-f:RegisterEvent("CHAT_MSG_ADDON")
-f:RegisterEvent("GROUP_ROSTER_UPDATE")
-f:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
-f:RegisterEvent("CHAT_MSG_RAID")
-f:RegisterEvent("CHAT_MSG_RAID_LEADER")
-f:RegisterEvent("ZONE_CHANGED")
-f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 
 function PI:UpdateTickerState()
     if ((PI.playerIsPriest or PowerInfusionAssignmentsDB.showForNonPriest) and IsInRaid() and not PI.inCombat) then
@@ -1415,49 +1650,70 @@ function PI:UpdateTickerState()
     end
 end
 
+local f = CreateFrame("Frame")
+f:RegisterEvent("PLAYER_LOGIN")
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
+f:RegisterEvent("PLAYER_REGEN_DISABLED")
+f:RegisterEvent("PLAYER_REGEN_ENABLED")
+f:RegisterEvent("CHAT_MSG_ADDON")
+f:RegisterEvent("GROUP_ROSTER_UPDATE")
+f:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
+f:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")
+f:RegisterEvent("CHAT_MSG_RAID")
+f:RegisterEvent("CHAT_MSG_RAID_LEADER")
+f:RegisterEvent("ZONE_CHANGED")
+f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+
 f:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         C_ChatInfo.RegisterAddonMessagePrefix(PI_MSG_PREFIX)
         PI:InitDB()
-        PI.playerIsPriest = select(2, UnitClass("player")) == "PRIEST"
         print("[PI] To configure Power Infusion Assignment Helper, type /pi")
-        if IsInRaid() then
-            PI:PopulateRaidMembers()
-        end
-        PI:RefreshClassColorCache()
+        PI:RefreshRoster()
         PI:CreateAssignmentFrame()
         PI:CreateOptionsWindow()
         PI:UpdateAssignmentFrame()
         PI:UpdateAssignmentFrameVisibility()
         -- Start ticker only if in raid or test mode
         PI:UpdateTickerState()
+    elseif event == "PLAYER_ENTERING_WORLD" then
+        -- Zones and roster data are only valid again once the loading screen
+        -- is done, and PLAYER_LOGIN doesn't fire on a zone-in or a reload.
+        if myFullName then
+            PI:RefreshRoster()
+            PI:UpdateAssignmentFrame()
+            PI:UpdateAssignmentFrameVisibility()
+            PI:UpdateTickerState()
+        end
     elseif event == "PLAYER_REGEN_DISABLED" then
         PI.inCombat = true
         PI:UpdateAssignmentFrameVisibility()
+        PI:UpdateTickerState()
     elseif event == "PLAYER_REGEN_ENABLED" then
         PI.inCombat = false
         PI:UpdateAssignmentFrameVisibility()
+        PI:UpdateTickerState()
     elseif event == "CHAT_MSG_ADDON" then
         local prefix, message, channel, sender = ...
         PI:OnAddonMessage(prefix, message, channel, sender)
     elseif event == "GROUP_ROSTER_UPDATE" then
-        wipe(PI.groupMembers)
-        if IsInRaid() then
-            PI:PopulateRaidMembers()
-        end
-        PI:RefreshClassColorCache()
+        -- Fires several times in a row when a raid forms up
+        PI:RefreshRoster()
         PI:CleanupStaleAssignments()
+        PI:RequestFrameUpdate()
         PI:UpdateAssignmentFrameVisibility()
         PI:UpdateTickerState()
         -- Broadcast current assignment to new group members
         if PI.playerIsPriest and IsInRaid() and not PowerInfusionAssignmentsDB.testMode then
             PI:BroadcastAssignment(true)
         end
-    elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" then
+    elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER"
+        or event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" then
         local message, sender = ...
         PI:OnChatMessage(message, sender)
     elseif event == "ZONE_CHANGED" or event == "ZONE_CHANGED_NEW_AREA" then
-        PI:UpdateAssignmentFrame()
+        PI:RefreshRoster()
         PI:CleanupStaleAssignments()
+        PI:RequestFrameUpdate()
     end
 end)
