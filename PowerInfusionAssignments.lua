@@ -1,6 +1,11 @@
 local PI = {}
 local PI_MSG_PREFIX = "PIAssign"
 
+-- Sent after a reload to ask the other priests to re-announce. A 1.4.x client
+-- splits this on ":" , gets no second field and drops it, so it is safe to
+-- send into a mixed raid.
+local PI_MSG_REQUEST = "?"
+
 -- Fake test data for test mode. Names are stored unqualified here and get a
 -- realm attached by SetTestMode, so they key the same way as real players.
 local TEST_ASSIGNMENTS = {
@@ -49,6 +54,13 @@ local cachedMacroName = nil
 -- Resolved once at login; every stored name is qualified against this realm.
 local myFullName = nil
 local myRealm = nil
+
+-- Session-only debug logging, toggled with /pi debug. Not a saved variable:
+-- it should never survive a reload and there is no option for it.
+function PI:Debug(fmt, ...)
+    if not PI.debugging then return end
+    print("|cff9cd6ff[PI]|r "..string.format(fmt, ...))
+end
 
 -- Ticker management
 local scanTicker = nil
@@ -103,6 +115,10 @@ local function StopScanTicker()
         scanTicker:Cancel()
         scanTicker = nil
     end
+end
+
+function PI:IsScanning()
+    return scanTicker ~= nil
 end
 
 -- Names are stored realm-qualified ("Name-Realm") everywhere. A short name is
@@ -359,20 +375,45 @@ function PI:BroadcastAssignment(force)
     -- name field on receipt (see OnAddonMessage) but 1.4.x clients key off it.
     local payload = PI:ToWire(PI:GetPlayerName())..":"..PI:ToWire(target)
     -- Use RAID channel for more reliable communication in instances
+    PI:Debug("send %s", payload)
     C_ChatInfo.SendAddonMessage(PI_MSG_PREFIX, payload, "RAID")
+end
+
+function PI:RequestAssignments()
+    if not IsInRaid() then return end
+    if PowerInfusionAssignmentsDB.testMode then return end
+    PI:Debug("asking the raid to re-announce")
+    C_ChatInfo.SendAddonMessage(PI_MSG_PREFIX, PI_MSG_REQUEST, "RAID")
 end
 
 function PI:OnAddonMessage(prefix, message, channel, sender)
     if prefix ~= PI_MSG_PREFIX then return end
-    if channel ~= "RAID" and channel ~= "INSTANCE_CHAT" then return end
+    PI:Debug("recv channel=%s sender=%s msg=%s", tostring(channel), tostring(sender), tostring(message))
+    -- Deliberately no channel filter. The prefix is already unique to us, and
+    -- filtering on the reported channel dropped every message in a raid group
+    -- that wasn't an instance group.
     -- Key the assignment off the sender the server reports rather than the
     -- name in the payload, so nobody can post under another priest's name.
     local from = PI:Qualify(sender)
     if not from or from == PI:GetPlayerName() then return end
+
+    -- Someone reloaded and lost their copy. Re-announce ours even though it
+    -- hasn't changed, staggered so a raid full of priests doesn't answer in
+    -- the same frame.
+    if message == PI_MSG_REQUEST then
+        if PI.playerIsPriest and not PowerInfusionAssignmentsDB.testMode then
+            PI:Debug("%s asked for assignments, re-announcing", from)
+            C_Timer.After(math.random() * 2, function() PI:BroadcastAssignment(true) end)
+        end
+        return
+    end
+
     local _, target = strsplit(":", message)
     if not target or target == "" then return end
     -- An unqualified target is on the sender's realm, not ours
-    PowerInfusionAssignmentsDB.assignments[from] = PI:FromWire(target, RealmOf(from))
+    local resolved = PI:FromWire(target, RealmOf(from))
+    PI:Debug("stored [%s] -> %s", from, tostring(resolved))
+    PowerInfusionAssignmentsDB.assignments[from] = resolved
     PI:RequestFrameUpdate()
 end
 
@@ -490,6 +531,7 @@ function PI:InitDB()
     local name, realm = UnitFullName("player")
     myRealm = (realm and realm ~= "" and realm) or GetNormalizedRealmName() or ""
     myFullName = PI:Qualify(name or UnitName("player"), myRealm)
+    PI.myRealm = myRealm
     PI.playerIsPriest = select(2, UnitClass("player")) == "PRIEST"
 end
 
@@ -765,14 +807,17 @@ function PI:UpdateAssignmentFrame()
 
     -- Check for duplicate targets, role warnings (PI assigned healer/tank), or
     -- targets who left the raid / are in another zone
-    local _, instanceType = GetInstanceInfo()
     local hasDuplicates = false
     local hasRoleWarning = false
     local targetMissing = false
     local targetsNotInZone = false
 
-    -- only run these checks if we're actually in a raid, no point showing them in a major city or outdoor zones
-    if instanceType == "raid" then
+    -- Deliberately gated on standing inside a raid instance, not merely being
+    -- in a raid group: the warnings are noise in a city or out in the world.
+    -- This is why nothing fires while the raid is still forming up.
+    -- /pi debug lifts the gate so the warnings can be exercised anywhere.
+    local _, instanceType = GetInstanceInfo()
+    if instanceType == "raid" or PI.debugging then
         hasDuplicates = PI:CheckForDuplicateTargets()
         hasRoleWarning = PI:CheckForRoleWarnings()
         targetMissing, targetsNotInZone = PI:CheckTargetProblems()
@@ -1574,8 +1619,40 @@ function PI:CreateOptionsWindow()
     SelectSection("setup")
 end
 
+function PI:DumpState()
+    local db = PowerInfusionAssignmentsDB
+    print("|cff9cd6ff[PI]|r debug "..(PI.debugging and "ON" or "OFF"))
+    print(string.format("  me=%s realm=%s priest=%s inRaid=%s inCombat=%s",
+        tostring(PI:GetPlayerName()), tostring(PI.myRealm or ""),
+        tostring(PI.playerIsPriest), tostring(IsInRaid()), tostring(PI.inCombat)))
+    local _, instanceType = GetInstanceInfo()
+    print(string.format("  zone=%s instanceType=%s groupSize=%d ticker=%s",
+        tostring(GetZoneText()), tostring(instanceType), GetNumGroupMembers(),
+        tostring(PI:IsScanning())))
+    print(string.format("  mode=%d macro=%s testMode=%s lastBroadcast=%s",
+        db.piMode or 1, tostring(db.macroName), tostring(db.testMode),
+        tostring(PI.lastBroadcastedTarget)))
+    local n = 0
+    for player, target in pairs(db.assignments) do
+        n = n + 1
+        print(string.format("  [%s] -> %s  inGroup=%s sameZone=%s role=%s",
+            player, tostring(target), tostring(PI:IsPlayerInGroup(player)),
+            tostring(PI:IsPlayerInSameZone(player)), tostring(PI:GetRoleForName(target))))
+    end
+    if n == 0 then print("  (no assignments)") end
+end
+
 SLASH_POWERINFUSION1 = "/pi"
 SlashCmdList["POWERINFUSION"] = function(msg)
+    local cmd = strlower(strtrim(msg or ""))
+    if cmd == "debug" then
+        PI.debugging = not PI.debugging
+        PI:DumpState()
+        return
+    elseif cmd == "status" then
+        PI:DumpState()
+        return
+    end
     PI:CreateOptionsWindow()
     if PI.options:IsShown() then
         PI.options:Hide()
@@ -1632,6 +1709,7 @@ function PI:CleanupStaleAssignments()
     -- list and force everyone to rebroadcast.
     for player in pairs(PowerInfusionAssignmentsDB.assignments) do
         if player ~= myName and not PI:IsPlayerInGroup(player) then
+            PI:Debug("cleanup dropped %s (not in group)", player)
             PowerInfusionAssignmentsDB.assignments[player] = nil
             changed = true
         end
@@ -1684,6 +1762,16 @@ f:SetScript("OnEvent", function(self, event, ...)
             PI:UpdateAssignmentFrame()
             PI:UpdateAssignmentFrameVisibility()
             PI:UpdateTickerState()
+            -- A reload leaves us with an empty table, and nothing on the other
+            -- clients prompts them to re-send, so ask. Skipped once we know
+            -- about anyone, which keeps ordinary loading screens quiet.
+            C_Timer.After(3, function()
+                local myName = PI:GetPlayerName()
+                for player in pairs(PowerInfusionAssignmentsDB.assignments) do
+                    if player ~= myName then return end
+                end
+                PI:RequestAssignments()
+            end)
         end
     elseif event == "PLAYER_REGEN_DISABLED" then
         PI.inCombat = true

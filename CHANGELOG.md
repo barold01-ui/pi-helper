@@ -2,6 +2,12 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.5.1]
+
+- fixed priests not seeing each other's PI targets
+- fixed assignments not coming back after a UI reload
+- added /pi debug for troubleshooting
+
 ## [1.5.0]
 
 - redesigned the options window with a sidebar; all the same settings
