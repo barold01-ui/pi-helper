@@ -1,10 +1,10 @@
-tag e89ab44e0d87a0c3b963f16dfc9e349942f25f17 1.4.2
-Author:	aname43
-Date:	Fri Apr 10 00:37:53 2026 +1000
+tag c6a2957762e786c15f28629f18b9f03eff3295db 1.4.5
+Author:	aname43 <seb@moodle.com>
+Date:	Sun Jun 21 14:43:44 2026 +1000
 
-commit ea1160ee74c7595a6bcfe416d533851977201330
-Author: aname43
-Date:   Fri Apr 10 00:33:47 2026 +1000
+commit 88dedf6dbf043e7870728d2a1e272aea73f6a63e
+Author: aname43 <seb@moodle.com>
+Date:   Wed Jun 17 05:05:38 2026 +1000
 
-    1.4.1
+    1.4.4
 
