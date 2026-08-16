@@ -4,3 +4,4 @@ ignore:
   - README.md
   - .git
   - .gitignore
+  - check.lua

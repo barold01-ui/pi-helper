@@ -39,11 +39,19 @@ local RAID_UNITS = {}
 for i = 1, 40 do RAID_UNITS[i] = "raid"..i end
 
 -- Scratch tables reused so the 3 second ticker doesn't churn garbage.
-local reuseLines = {}
 local reuseErrorLines = {}
 local reusePriests = {}
 local reuseReport = {}
 local reuseTargetCounts = {}
+
+-- The panel is drawn from row descriptors rather than one concatenated string,
+-- so these are the two halves of the display diff: reuseRows is rebuilt every
+-- update, lastRows mirrors what is actually on screen. Both hold the same
+-- tables from update to update; only their fields are overwritten.
+local reuseRows = {}
+local reuseRowCount = 0
+local lastRows = {}
+local lastRowCount = -1   -- -1 so the first update always draws
 
 -- Macro parse cache
 local cachedMacroTarget = nil
@@ -276,11 +284,21 @@ function PI:GetClassColorForName(name)
     return classColorCache[name]
 end
 
-function PI:ColorText(text, colorCode)
-    if colorCode then
-        return colorCode..text.."|r"
+-- The roster cache stores colours as "|cffRRGGBB" escape codes. The panel
+-- colours FontStrings directly, so unpack the hex into 0-1 RGB. Keyed by the
+-- code string, which only ever holds one entry per class.
+local classRGBCache = {}
+function PI:GetClassRGB(name)
+    local code = PI:GetClassColorForName(name)
+    if not code then return 1, 1, 1 end
+    local rgb = classRGBCache[code]
+    if not rgb then
+        local r, g, b = string.match(code, "|c%x%x(%x%x)(%x%x)(%x%x)")
+        if not r then return 1, 1, 1 end
+        rgb = { tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255 }
+        classRGBCache[code] = rgb
     end
-    return text
+    return rgb[1], rgb[2], rgb[3]
 end
 
 function PI:FindMacroIndexByName(name)
@@ -520,7 +538,7 @@ function PI:InitDB()
     -- few seconds, so start empty rather than restoring last session's (or
     -- last session's test mode) names.
     PowerInfusionAssignmentsDB.assignments = {}
-    PI.lastFrameText = nil
+    lastRowCount = -1
     PI.lastFrameErrorText = nil
     if PowerInfusionAssignmentsDB.hideInCombat == nil then PowerInfusionAssignmentsDB.hideInCombat = true end
     if PowerInfusionAssignmentsDB.enableWhispers == nil then PowerInfusionAssignmentsDB.enableWhispers = false end
@@ -653,14 +671,115 @@ local function FlashOnUpdate(self, elapsed)
     end
 end
 
+-- Metrics and palette come from the assignment-panel handoff in
+-- .claude/design/design_handoff_pi_assignment_panel/ (option 2A, "Leader
+-- lines"). Every number there is already converted to 1x game pixels, so they
+-- are used as written and the frame's own SetScale does the rest.
+local PANEL = {
+    width       = 264,
+    padX        = 9,
+    padTop      = 7,
+    padBottom   = 8,
+    headerH     = 13,
+    headerGap   = 5,    -- header block down to the divider
+    dividerGap  = 6,    -- divider down to the first row
+    rowH        = 14,
+    rowGap      = 4,
+    tickW       = 2,
+    tickH       = 10,
+    nameIndent  = 7,    -- tick (2px) plus its 5px gap; tickless rows match it
+    leaderInset = 5,    -- clear space each side of the leader line
+    leaderMin   = 10,   -- shortest leader run a row is allowed to squeeze to
+    errorGap    = 6,
+    fontRow     = 14,
+    fontHeader  = 10,
+    fontError   = 12,
+}
+
+-- Arial Narrow is the condensed face the client already ships, which is the
+-- handoff's preferred answer before bundling a TTF of our own.
+local PANEL_FONT = "Fonts\\ARIALN.TTF"
+
+local PC = {
+    bg         = {0.035, 0.031, 0.051, 0.84},
+    border     = {1, 1, 1, 0.13},
+    lip        = {1, 1, 1, 0.07},
+    divider    = {1, 1, 1, 0.09},
+    -- The handoff dims the header to 42% white. At 10px that is too faint to
+    -- read at a glance, which is the one thing this panel is for, so it is
+    -- full white instead.
+    header     = {1, 1, 1, 1},
+    nameSelf   = {1, 1, 1, 1},
+    nameOther  = {1, 1, 1, 0.86},
+    none       = {1, 0.482, 0.447, 1},      -- #FF7B72
+    accent     = {0.847, 0.706, 0.416, 1},  -- #D8B46A
+    -- The design's leader is a 1px dotted line. There is no dot texture to
+    -- tile, so this is the handoff's sanctioned fallback: a solid line at 40%
+    -- of the dotted alpha, which averages out to the same weight at 1px.
+    leader     = {1, 1, 1, 0.16 * 0.4},
+    leaderNone = {1, 0.482, 0.447, 0.40 * 0.4},
+}
+
+local function Tint(tex, c)
+    tex:SetColorTexture(c[1], c[2], c[3], c[4])
+end
+
+local function TintText(fs, c)
+    fs:SetTextColor(c[1], c[2], c[3], c[4])
+end
+
+-- Rows are pooled and only ever hidden, never destroyed: the vertical anchor
+-- of row n never changes, so it is set once here.
+local function AcquireRow(f, index)
+    local row = f.rows[index]
+    if row then return row end
+
+    row = CreateFrame("Frame", nil, f)
+    row:SetHeight(PANEL.rowH)
+    local y = PANEL.padTop + PANEL.headerH + PANEL.headerGap + 1 + PANEL.dividerGap
+              + (index - 1) * (PANEL.rowH + PANEL.rowGap)
+    row:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL.padX, -y)
+    row:SetPoint("TOPRIGHT", f, "TOPRIGHT", -PANEL.padX, -y)
+
+    local tick = row:CreateTexture(nil, "ARTWORK")
+    tick:SetSize(PANEL.tickW, PANEL.tickH)
+    tick:SetPoint("LEFT", row, "LEFT", 0, 0)
+    Tint(tick, PC.accent)
+    tick:Hide()
+    row.tick = tick
+
+    local name = row:CreateFontString(nil, "OVERLAY")
+    name:SetFont(PANEL_FONT, PANEL.fontRow, "")
+    name:SetPoint("LEFT", row, "LEFT", PANEL.nameIndent, 0)
+    name:SetJustifyH("LEFT")
+    name:SetShadowOffset(1, -1)
+    name:SetShadowColor(0, 0, 0, 1)
+    row.name = name
+
+    local target = row:CreateFontString(nil, "OVERLAY")
+    target:SetFont(PANEL_FONT, PANEL.fontRow, "")
+    target:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+    target:SetJustifyH("RIGHT")
+    target:SetShadowOffset(1, -1)
+    target:SetShadowColor(0, 0, 0, 1)
+    row.target = target
+
+    -- Anchored between the two unsized FontStrings, so it stretches and
+    -- shrinks with the names without anything measuring them.
+    local leader = row:CreateTexture(nil, "ARTWORK")
+    leader:SetHeight(1)
+    leader:SetPoint("LEFT", name, "RIGHT", PANEL.leaderInset, 0)
+    leader:SetPoint("RIGHT", target, "LEFT", -PANEL.leaderInset, 0)
+    row.leader = leader
+
+    f.rows[index] = row
+    return row
+end
+
 function PI:CreateAssignmentFrame()
     if PI.frame then return end
-    local f = CreateFrame("Frame", "PIAssignmentFrame", UIParent, "BackdropTemplate")
-    f.minWidth = 220
-    f.minHeight = 40
-    f.padX = 28
-    f.padY = 0
-    f:SetSize(f.minWidth, f.minHeight)
+    local f = CreateFrame("Frame", "PIAssignmentFrame", UIParent)
+    f:SetSize(PANEL.width, 60)
     local pos = PowerInfusionAssignmentsDB and PowerInfusionAssignmentsDB.framePos
     if pos and pos.point and pos.x and pos.y then
         f:SetPoint(pos.point, UIParent, pos.point, pos.x, pos.y)
@@ -682,23 +801,63 @@ function PI:CreateAssignmentFrame()
         end
     end)
     f:SetClampedToScreen(true)
-    f:SetBackdrop({ bgFile = "Interface/Tooltips/UI-Tooltip-Background", edgeFile = "Interface/Tooltips/UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 12, insets = { left = 4, right = 4, top = 4, bottom = 4 } })
-    f:SetBackdropColor(0,0,0,0.6)
-
     f:SetScale(PowerInfusionAssignmentsDB.scale or 1)
 
-    local text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    text:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -10)
-    text:SetJustifyH("LEFT")
-    text:SetText("")
-    f.text = text
+    local bg = f:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints(f)
+    Tint(bg, PC.bg)
 
-    local errorText = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    errorText:SetPoint("TOPLEFT", text, "BOTTOMLEFT", 0, -5)
+    -- Four 1px textures rather than a backdrop edge file: SetBackdrop cannot
+    -- draw a square hairline border, which is the whole look here.
+    local edges = {}
+    for i = 1, 4 do
+        edges[i] = f:CreateTexture(nil, "BORDER")
+        Tint(edges[i], PC.border)
+    end
+    edges[1]:SetPoint("TOPLEFT");    edges[1]:SetPoint("TOPRIGHT");    edges[1]:SetHeight(1)
+    edges[2]:SetPoint("BOTTOMLEFT"); edges[2]:SetPoint("BOTTOMRIGHT"); edges[2]:SetHeight(1)
+    edges[3]:SetPoint("TOPLEFT");    edges[3]:SetPoint("BOTTOMLEFT");  edges[3]:SetWidth(1)
+    edges[4]:SetPoint("TOPRIGHT");   edges[4]:SetPoint("BOTTOMRIGHT"); edges[4]:SetWidth(1)
+
+    -- The faint lip just inside the top edge
+    local lip = f:CreateTexture(nil, "BORDER")
+    lip:SetPoint("TOPLEFT", f, "TOPLEFT", 1, -1)
+    lip:SetPoint("TOPRIGHT", f, "TOPRIGHT", -1, -1)
+    lip:SetHeight(1)
+    Tint(lip, PC.lip)
+
+    -- The design tracks the header by 1.5px. WoW has no letter-spacing API and
+    -- padding it with real spaces overshoots by double, so it ships untracked.
+    local header = f:CreateFontString(nil, "OVERLAY")
+    header:SetFont(PANEL_FONT, PANEL.fontHeader, "")
+    header:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL.padX, -PANEL.padTop)
+    header:SetJustifyH("LEFT")
+    header:SetShadowOffset(1, -1)
+    header:SetShadowColor(0, 0, 0, 1)
+    TintText(header, PC.header)
+    header:SetText("POWER INFUSION")
+    f.header = header
+
+    local divY = PANEL.padTop + PANEL.headerH + PANEL.headerGap
+    local divider = f:CreateTexture(nil, "ARTWORK")
+    divider:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL.padX, -divY)
+    divider:SetPoint("TOPRIGHT", f, "TOPRIGHT", -PANEL.padX, -divY)
+    divider:SetHeight(1)
+    Tint(divider, PC.divider)
+    f.divider = divider
+
+    -- Warning lines. Anchored by the layout pass, because where they start
+    -- depends on how many rows are showing.
+    local errorText = f:CreateFontString(nil, "OVERLAY")
+    errorText:SetFont(PANEL_FONT, PANEL.fontError, "")
     errorText:SetJustifyH("LEFT")
-    errorText:SetTextColor(1, 0, 0)
+    TintText(errorText, PC.none)
+    errorText:SetShadowOffset(1, -1)
+    errorText:SetShadowColor(0, 0, 0, 1)
     errorText:SetText("")
     f.errorText = errorText
+
+    f.rows = {}
 
     -- Warning icon for issues (top)
     local warningIconTop = f:CreateTexture(nil, "OVERLAY")
@@ -763,45 +922,101 @@ function PI:CheckForRoleWarnings()
     return false
 end
 
-function PI:ResizeAssignmentFrameToText()
-    if not PI.frame or not PI.frame.text then return end
-    local textWidth = PI.frame.text:GetStringWidth() or 0
-    local textHeight = PI.frame.text:GetStringHeight() or 0
-    local errorWidth = PI.frame.errorText:GetStringWidth() or 0
-    local errorHeight = PI.frame.errorText:GetStringHeight() or 0
-    local totalWidth = math.max(textWidth, errorWidth)
-    local totalHeight = textHeight + errorHeight + 5  -- 5 for space
-    local minWidth = PI.frame.minWidth or 220
-    local minHeight = PI.frame.minHeight or 40
-    local padX = PI.frame.padX or 28
-    local padY = PI.frame.padY or 0
-    local extraPadY = (PI.frame.errorText:GetText() ~= "") and 20 or 0
-    PI.frame:SetSize(math.max(minWidth, totalWidth + padX), math.max(minHeight, totalHeight + padY + extraPadY))
+-- Writes the row descriptors onto the pooled row frames and hides the surplus.
+-- Only called when the diff in UpdateAssignmentFrame says something moved.
+local function ApplyPanelRows(f)
+    for i = 1, reuseRowCount do
+        local r = reuseRows[i]
+        local row = AcquireRow(f, i)
+
+        row.name:SetText(r.name)
+        TintText(row.name, r.isSelf and PC.nameSelf or PC.nameOther)
+        if r.isSelf then row.tick:Show() else row.tick:Hide() end
+
+        row.target:SetText(r.target)
+        if r.none then
+            TintText(row.target, PC.none)
+            Tint(row.leader, PC.leaderNone)
+        else
+            row.target:SetTextColor(PI:GetClassRGB(r.full))
+            Tint(row.leader, PC.leader)
+        end
+        row:Show()
+    end
+    for i = reuseRowCount + 1, #f.rows do
+        f.rows[i]:Hide()
+    end
+end
+
+-- The panel is a fixed 264px in the design. It only ever grows from there,
+-- and only far enough that the longest pair still has a leader between it —
+-- the alternative is a name running into the target column.
+function PI:LayoutAssignmentFrame()
+    local f = PI.frame
+    if not f then return end
+
+    local widest = 0
+    for i = 1, reuseRowCount do
+        local row = f.rows[i]
+        local w = PANEL.nameIndent + (row.name:GetStringWidth() or 0)
+                  + PANEL.leaderInset * 2 + PANEL.leaderMin
+                  + (row.target:GetStringWidth() or 0)
+        if w > widest then widest = w end
+    end
+    local width = math.max(PANEL.width, math.ceil(widest) + PANEL.padX * 2)
+
+    local height = PANEL.padTop + PANEL.headerH + PANEL.headerGap + 1 + PANEL.dividerGap
+    if reuseRowCount > 0 then
+        height = height + reuseRowCount * PANEL.rowH + (reuseRowCount - 1) * PANEL.rowGap
+    end
+
+    if f.errorText:GetText() ~= "" then
+        f.errorText:SetWidth(width - PANEL.padX * 2)
+        f.errorText:ClearAllPoints()
+        f.errorText:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL.padX, -(height + PANEL.errorGap))
+        height = height + PANEL.errorGap + math.ceil(f.errorText:GetStringHeight() or 0)
+    end
+
+    f:SetSize(width, height + PANEL.padBottom)
+end
+
+-- One row of the panel. `full` is the qualified target, kept because the class
+-- colour is looked up by it; `color` is that colour, kept because the diff
+-- below has to repaint a row whose target keeps its name but changes class -
+-- a test-mode toggle, or a reconnect that refills the colour cache.
+local function PushRow(displayName, target, isSelf)
+    reuseRowCount = reuseRowCount + 1
+    local r = reuseRows[reuseRowCount]
+    if not r then r = {}; reuseRows[reuseRowCount] = r end
+    r.name = displayName
+    r.isSelf = isSelf
+    if target and target ~= "" then
+        r.full = target
+        r.target = PI:ShortName(target)
+        r.color = PI:GetClassColorForName(target)
+        r.none = false
+    else
+        r.full = nil
+        r.target = "(none)"
+        r.color = nil
+        r.none = true
+    end
 end
 
 function PI:UpdateAssignmentFrame()
     PI:CreateAssignmentFrame()
-    wipe(reuseLines)
+    reuseRowCount = 0
     local myName = PI:GetPlayerName()
 
     -- First add the local player's assignment at the top (only if priest)
     if PI.playerIsPriest then
-        local myTarget = PowerInfusionAssignmentsDB.assignments[myName]
-        local coloredMe = PI:ColorText(PI:ShortName(myName), PI:GetClassColorForName(myName))
-        if myTarget and myTarget ~= "" then
-            local coloredTarget = PI:ColorText(PI:ShortName(myTarget), PI:GetClassColorForName(myTarget))
-            reuseLines[#reuseLines + 1] = coloredMe.." -> "..coloredTarget
-        else
-            reuseLines[#reuseLines + 1] = coloredMe.." -> (none)"
-        end
+        PushRow(PI:ShortName(myName), PowerInfusionAssignmentsDB.assignments[myName], true)
     end
 
     -- Then add other players' assignments
     for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if player ~= myName and target and target ~= "" and (PowerInfusionAssignmentsDB.testMode or PI:IsPlayerInSameZone(player)) then
-            local coloredPlayer = PI:ColorText(PI:ShortName(player), PI:GetClassColorForName(player))
-            local coloredTarget = PI:ColorText(PI:ShortName(target), PI:GetClassColorForName(target))
-            reuseLines[#reuseLines + 1] = coloredPlayer.." -> "..coloredTarget
+            PushRow(PI:ShortName(player), target, false)
         end
     end
 
@@ -837,13 +1052,32 @@ function PI:UpdateAssignmentFrame()
         reuseErrorLines[#reuseErrorLines + 1] = "One or more PI targets are in a different zone!"
     end
 
-    local newText = table.concat(reuseLines, "\n")
+    -- Diff against what is on screen rather than rebuilding a string to
+    -- compare: this runs on the ticker for everyone in the raid.
+    local changed = (reuseRowCount ~= lastRowCount)
+    if not changed then
+        for i = 1, reuseRowCount do
+            local a, b = reuseRows[i], lastRows[i]
+            if a.name ~= b.name or a.target ~= b.target
+               or a.isSelf ~= b.isSelf or a.color ~= b.color then
+                changed = true
+                break
+            end
+        end
+    end
+
     local newErrorText = table.concat(reuseErrorLines, "\n")
-    if newText ~= PI.lastFrameText or newErrorText ~= PI.lastFrameErrorText then
-        PI.frame.text:SetText(newText)
+    if changed or newErrorText ~= PI.lastFrameErrorText then
+        ApplyPanelRows(PI.frame)
         PI.frame.errorText:SetText(newErrorText)
-        PI:ResizeAssignmentFrameToText()
-        PI.lastFrameText = newText
+        PI:LayoutAssignmentFrame()
+        for i = 1, reuseRowCount do
+            local a = reuseRows[i]
+            local b = lastRows[i]
+            if not b then b = {}; lastRows[i] = b end
+            b.name, b.target, b.isSelf, b.color = a.name, a.target, a.isSelf, a.color
+        end
+        lastRowCount = reuseRowCount
         PI.lastFrameErrorText = newErrorText
     end
 

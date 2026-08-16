@@ -2,6 +2,11 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.5.2]
+
+- reworked the assignment window: cleaner list, easier to read at a glance
+- no changes to how assignments are worked out or shared
+
 ## [1.5.1]
 
 - fixed priests not seeing each other's PI targets
