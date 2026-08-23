@@ -2,6 +2,10 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.5.4]
+
+- bump toc for 12.1.0
+
 ## [1.5.3]
 
 - fixed a Lua error when raid chat arrived on 12.0 clients that hide chat

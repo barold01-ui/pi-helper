@@ -1,7 +1,7 @@
-## Interface: 120000, 120007
+## Interface: 120000, 120007, 120100
 ## Title: PowerInfusionAssignments
 ## Notes: Track Power Infusion assignments from a user-specified macro
 ## Author: aname43
-## Version: 1.5.3
+## Version: 1.5.4
 ## SavedVariables: PowerInfusionAssignmentsDB
 PowerInfusionAssignments.lua
