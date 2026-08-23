@@ -489,6 +489,11 @@ local REPORT_COOLDOWN = 10
 
 function PI:OnChatMessage(message, sender)
     if PI.inCombat then return end
+    -- 12.0 can hand chat payloads to addon code as secret values: reading one
+    -- while our own code is on the stack errors, and #message below is the
+    -- first thing that touches it. Nothing to do with a secret line but drop
+    -- it -- the client is refusing to let us read the raid's chat at all.
+    if issecretvalue and (issecretvalue(message) or issecretvalue(sender)) then return end
     -- Raid chat is busy; bail on length before allocating the lowered/trimmed
     -- copies, since every line in the raid comes through here.
     if not message or #message > 8 then return end

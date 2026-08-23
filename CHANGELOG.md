@@ -2,6 +2,11 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [1.5.3]
+
+- fixed a Lua error when raid chat arrived on 12.0 clients that hide chat
+  text from addons; !pi simply doesn't answer those lines now
+
 ## [1.5.2]
 
 - reworked the assignment window: cleaner list, easier to read at a glance
