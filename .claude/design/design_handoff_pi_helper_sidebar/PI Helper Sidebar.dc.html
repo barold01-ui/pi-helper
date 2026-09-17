@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600&family=Barlow+Semi+Condensed:wght@400;500;600&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; background: #0f0d0a; }
+  * { box-sizing: border-box; }
+  a { color: #d9a13b; }
+  a:hover { color: #f2c66d; }
+  input, select, textarea, button { font-family: inherit; }
+</style>
+</helmet>
+
+<div style="padding: 56px; background: #0f0d0a; color: #c8bba6; font-family: 'Barlow Semi Condensed', system-ui, sans-serif; min-height: 100vh; display: flex; justify-content: center">
+  <div style="width: 720px; align-self: flex-start; border: 1px solid #4a3a22; background: #1b1611; box-shadow: 0 0 0 1px #0b0906, 0 18px 40px rgba(0,0,0,0.5)">
+    <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid #3a2d1b; background: #221b13">
+      <span style="font-family: Cinzel, serif; font-size: 17px; color: #f2c66d">Power Infusion Assignment Helper</span>
+      <button style="width: 22px; height: 22px; line-height: 1; background: #4a1a13; border: 1px solid #7c3b23; color: #e9c69a; font-size: 13px; cursor: pointer" style-hover="background: #5e2118">✕</button>
+    </div>
+
+    <div style="display: flex; min-height: 400px">
+      <div style="width: 172px; flex: none; border-right: 1px solid #3a2d1b; background: #17120d; display: flex; flex-direction: column; padding: 8px 0">
+        <sc-for list="{{ nav }}" as="n" hint-placeholder-count="4">
+          <button onClick="{{ n.onPick }}" style="font-family: inherit; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 14px; background: {{ n.bg }}; border: none; border-left: 3px solid {{ n.mark }}; cursor: pointer; text-align: left; font-size: 15px; color: {{ n.color }}" style-hover="background: #221b13">
+            <span>{{ n.label }}</span>
+            <span style="font-size: 12px; color: #6e6455">{{ n.badge }}</span>
+          </button>
+        </sc-for>
+      </div>
+
+      <div style="flex: 1; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px">
+        <sc-if value="{{ cSetup }}" hint-placeholder-val="{{ true }}">
+          <div style="display: flex; flex-direction: column; gap: 16px">
+            <div style="display: flex; flex-direction: column; gap: 10px">
+              <span style="font-family: Barlow, sans-serif; font-size: 11px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: #b08a3d">Mode</span>
+              <select style="width: 100%; background: #100d09; border: 1px solid #6d5320; color: #f0e2c4; padding: 8px 10px; font-size: 15px; outline: none; cursor: pointer">
+                <option>My PI target is set in a macro</option>
+              </select>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px">
+              <span style="font-size: 15px; color: #c8bba6">Macro name</span>
+              <input type="text" value="{{ macroName }}" onInput="{{ onMacroName }}" style="width: 150px; background: #100d09; border: 1px solid #453519; color: #f0e2c4; padding: 7px 10px; font-size: 15px; outline: none" style-focus="border-color: #c9922f">
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 8px">
+              <span style="font-size: 14px; color: #8b7f6d">Example macro, if you need to create one</span>
+              <pre style="margin: 0; padding: 12px; background: #0c0a07; border: 1px solid #3d3018; color: #8fcf7a; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-all">{{ macroText }}</pre>
+              <button onClick="{{ onCopy }}" style="align-self: flex-start; font-size: 14px; padding: 7px 14px; cursor: pointer; background: #4a3a17; border: 1px solid #7a5c22; color: #f2c66d" style-hover="background: #5c4820">{{ copyLabel }}</button>
+            </div>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ cBehavior }}" hint-placeholder-val="{{ false }}">
+          <div style="display: flex; flex-direction: column">
+            <sc-for list="{{ behaviorToggles }}" as="t" hint-placeholder-count="3">
+              <button onClick="{{ t.onToggle }}" style="font-family: inherit; display: flex; align-items: flex-start; gap: 12px; padding: 11px 0; background: none; border: none; border-bottom: 1px solid #221b13; cursor: pointer; text-align: left">
+                <span style="width: 16px; height: 16px; margin-top: 2px; flex: none; display: flex; align-items: center; justify-content: center; background: {{ t.boxBg }}; border: 1px solid {{ t.boxBorder }}; color: #0f0d0a; font-size: 12px; line-height: 1">{{ t.mark }}</span>
+                <span style="display: flex; flex-direction: column; gap: 2px">
+                  <span style="font-size: 15px; color: {{ t.labelColor }}">{{ t.label }}</span>
+                  <span style="font-size: 13px; color: #7d7362">{{ t.desc }}</span>
+                </span>
+              </button>
+            </sc-for>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ cDisplay }}" hint-placeholder-val="{{ false }}">
+          <div style="display: flex; flex-direction: column">
+            <sc-for list="{{ displayToggles }}" as="t" hint-placeholder-count="2">
+              <button onClick="{{ t.onToggle }}" style="font-family: inherit; display: flex; align-items: flex-start; gap: 12px; padding: 11px 0; background: none; border: none; border-bottom: 1px solid #221b13; cursor: pointer; text-align: left">
+                <span style="width: 16px; height: 16px; margin-top: 2px; flex: none; display: flex; align-items: center; justify-content: center; background: {{ t.boxBg }}; border: 1px solid {{ t.boxBorder }}; color: #0f0d0a; font-size: 12px; line-height: 1">{{ t.mark }}</span>
+                <span style="display: flex; flex-direction: column; gap: 2px">
+                  <span style="font-size: 15px; color: {{ t.labelColor }}">{{ t.label }}</span>
+                  <span style="font-size: 13px; color: #7d7362">{{ t.desc }}</span>
+                </span>
+              </button>
+            </sc-for>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ cFaq }}" hint-placeholder-val="{{ false }}">
+          <div style="padding: 40px 0; text-align: center; font-size: 15px; color: #6e6455">Your existing FAQ content, unchanged.</div>
+        </sc-if>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 14px; padding: 12px 20px; border-top: 1px solid #3a2d1b; background: #221b13">
+      <span style="font-size: 15px; color: #c8bba6">Scale</span>
+      <div onPointerDown="{{ onScaleTrack }}" style="flex: 1; position: relative; height: 20px; display: flex; align-items: center; cursor: pointer; touch-action: none">
+        <div style="position: absolute; left: 0; right: 0; height: 4px; background: #2c241a; border: 1px solid #191309"></div>
+        <div style="position: absolute; left: 0; height: 4px; width: {{ scaleFill }}; background: #d9a13b"></div>
+        <div style="position: absolute; left: {{ scaleFill }}; width: 9px; height: 18px; margin-left: -4px; background: #f2c66d; border: 1px solid #12100b"></div>
+      </div>
+      <div style="display: flex; align-items: center; border: 1px solid #453519; background: #100d09">
+        <button onClick="{{ onScaleDec }}" style="width: 26px; height: 26px; background: #2a2118; border: none; border-right: 1px solid #453519; color: #c9b795; font-size: 15px; line-height: 1; cursor: pointer" style-hover="background: #3a2d1b">−</button>
+        <span style="width: 52px; text-align: center; font-size: 15px; font-variant-numeric: tabular-nums; color: #f2c66d">{{ scaleVal }}</span>
+        <button onClick="{{ onScaleInc }}" style="width: 26px; height: 26px; background: #2a2118; border: none; border-left: 1px solid #453519; color: #c9b795; font-size: 15px; line-height: 1; cursor: pointer" style-hover="background: #3a2d1b">+</button>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;options&quot;:[&quot;#d9a13b&quot;,&quot;#7ea6d9&quot;,&quot;#8fcf7a&quot;,&quot;#c97ad9&quot;],&quot;default&quot;:&quot;#d9a13b&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+class Component extends DCLogic {
+  state = {
+    macroName: 'P',
+    copied: false,
+    scale: 1.05,
+    section: 'setup',
+    toggles: { hideCombat: true, showNonPriest: false, whispers: false, testMode: false, lockFrame: true }
+  };
+
+  defs = {
+    behavior: [
+      ['hideCombat', 'Hide PI assignments in combat', 'The assignment window disappears once you enter combat.'],
+      ['showNonPriest', 'Show PI assignments even if I\'m not a priest', 'Useful for raid leads tracking someone else\'s PI.'],
+      ['whispers', 'Enable whispers (guild only)', 'Whispers your target when you cast, limited to guild members.']
+    ],
+    display: [
+      ['testMode', 'Test mode (show fake data)', 'Fills the window with sample assignments so you can position it.'],
+      ['lockFrame', 'Lock frame', 'Stops the assignment window being dragged.']
+    ]
+  };
+
+  macroText = '/use [@mouseover,nodead,help]Power Infusion;[@YOUR_PI_TARGET_HERE,exists,nodead]Power Infusion;[@player]Power Infusion';
+
+  min = 0.5; max = 2; step = 0.05;
+  clamp(v) { return Math.min(this.max, Math.max(this.min, v)); }
+  quant(v) { return this.clamp(Math.round(v / this.step) * this.step); }
+
+  drag(e, apply) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const set = cx => {
+      const t = Math.min(1, Math.max(0, (cx - rect.left) / rect.width));
+      apply(this.quant(this.min + t * (this.max - this.min)));
+    };
+    set(e.clientX);
+    const mv = ev => set(ev.clientX);
+    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', mv);
+    window.addEventListener('pointerup', up);
+  }
+
+  toggle(key) {
+    this.setState(st => ({ toggles: Object.assign({}, st.toggles, { [key]: !st.toggles[key] }) }));
+  }
+
+  mk(defs) {
+    const accent = this.props.accent ?? '#d9a13b';
+    return defs.map(([key, label, desc]) => {
+      const on = !!this.state.toggles[key];
+      return {
+        key, label, desc,
+        mark: on ? '✔' : '',
+        boxBg: on ? accent : '#100d09',
+        boxBorder: on ? '#7a5c22' : '#453519',
+        labelColor: on ? '#f2c66d' : '#c8bba6',
+        onToggle: () => this.toggle(key)
+      };
+    });
+  }
+
+  renderVals() {
+    const st = this.state;
+    const accent = this.props.accent ?? '#d9a13b';
+    const badges = {
+      setup: st.macroName.trim() || '',
+      behavior: this.defs.behavior.filter(d => st.toggles[d[0]]).length + '/3',
+      display: this.defs.display.filter(d => st.toggles[d[0]]).length + '/2',
+      faq: ''
+    };
+    const nav = [['setup', 'Setup'], ['behavior', 'Behavior'], ['display', 'Display'], ['faq', 'FAQ']].map(([k, label]) => {
+      const on = st.section === k;
+      return {
+        key: k, label, badge: badges[k],
+        bg: on ? '#241d14' : 'transparent',
+        mark: on ? accent : 'transparent',
+        color: on ? '#f2c66d' : '#c8bba6',
+        onPick: () => this.setState({ section: k })
+      };
+    });
+
+    return {
+      nav,
+      cSetup: st.section === 'setup', cBehavior: st.section === 'behavior',
+      cDisplay: st.section === 'display', cFaq: st.section === 'faq',
+      macroName: st.macroName,
+      onMacroName: e => this.setState({ macroName: e.target.value, copied: false }),
+      macroText: this.macroText,
+      copyLabel: st.copied ? 'Copied' : 'Select all (Ctrl+C to copy)',
+      onCopy: () => {
+        if (navigator.clipboard) navigator.clipboard.writeText(this.macroText).catch(() => {});
+        this.setState({ copied: true });
+        clearTimeout(this._c);
+        this._c = setTimeout(() => this.setState({ copied: false }), 1600);
+      },
+      behaviorToggles: this.mk(this.defs.behavior),
+      displayToggles: this.mk(this.defs.display),
+      scaleVal: st.scale.toFixed(2),
+      scaleFill: (((st.scale - this.min) / (this.max - this.min)) * 100).toFixed(1) + '%',
+      onScaleTrack: e => this.drag(e, v => this.setState({ scale: v })),
+      onScaleDec: () => this.setState(s => ({ scale: this.quant(s.scale - this.step) })),
+      onScaleInc: () => this.setState(s => ({ scale: this.quant(s.scale + this.step) }))
+    };
+  }
+}
+</script>
+</body>
+</html>

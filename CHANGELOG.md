@@ -2,6 +2,24 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.0]
+
+- major refactor, now with visual PI notifications for raids and dungeons
+- new: cooldown alerts for healer priests (Discipline / Holy). When your PI
+  target uses a tracked cooldown, their frame is highlighted so you know when to
+  press Power Infusion — only while your own PI is off cooldown
+  - shows an icon on the frame (the Power Infusion icon or the actual cooldown
+    used) with a live countdown, and an optional pulsing border or full-frame
+    flash, in your own colour
+  - position the icon anywhere on the frame (9-point anchor, inside or outside)
+  - pick which cooldowns to watch (organised per DPS spec) and add your own
+  - works in raids and in 5-man dungeons (watch just your PI target, or every
+    DPS); works with popular raid frames
+- new: role-aware options window — healers see the alert tabs, Shadow priests
+  see only what applies to them; a "Setup" tab opens automatically on first
+  install
+- internal refactor into modules; no change to how assignments are shared
+
 ## [1.5.4]
 
 - bump toc for 12.1.0

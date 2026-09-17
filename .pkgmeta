@@ -1,7 +1,15 @@
 package-as: PowerInfusionAssignments
 
+# The packager zips the whole tagged tree minus these. Anything not loaded by
+# PowerInfusionAssignments.toc belongs here (or in .gitignore) -- dead Lua in
+# the zip is dead weight the client still has to ship to every user.
 ignore:
   - README.md
   - .git
   - .gitignore
-  - check.lua
+  - .github
+  - .claude          # dev docs + design handoff uploads (~7 MB)
+  - CLAUDE.md        # internal dev guide
+  - check.lua        # offline test harness, stubs the WoW API
+  - Sounds.lua       # not in the .toc, no callers: unfinished notify-sound work
+  - "*.bak"

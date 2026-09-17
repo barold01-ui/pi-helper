@@ -2,6 +2,17 @@
 ## Title: PowerInfusionAssignments
 ## Notes: Track Power Infusion assignments from a user-specified macro
 ## Author: aname43
-## Version: 1.5.4
-## SavedVariables: PowerInfusionAssignmentsDB
+## Version: 2.0.0
+## SavedVariables: PowerInfusionAssignmentsDB, PowerInfusionAssignmentsLog
+## OptionalDeps: LibSharedMedia-3.0, SharedMedia
 PowerInfusionAssignments.lua
+Roster.lua
+Comms.lua
+Macro.lua
+AssignmentFrame.lua
+Cooldowns.lua
+PIReady.lua
+RaidFrames.lua
+Glow.lua
+Notify.lua
+Options.lua

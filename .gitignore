@@ -1,0 +1,7 @@
+# Reference addon -- kept locally for comparison, never part of this addon.
+# Ships its own LICENSE and PIHelper.toc, so packaging it would redistribute
+# someone else's addon and expose a second .toc to the client.
+PIHelper/
+
+# Editor/refactor leftovers from the 1.6.0 module split.
+*.bak
