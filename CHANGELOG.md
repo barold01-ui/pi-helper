@@ -2,6 +2,17 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.1]
+
+- fixed cooldown alerts glowing a second, wrong player's frame. When your raid
+  frames re-sorted (someone joined/left, swapped groups, or the sort order
+  changed), the highlight stayed on your target's old frame as well as the new
+  one, so a different player's frame lit up too until you reloaded
+- if raid slots shift mid-fight, the alert now pauses until combat ends instead
+  of possibly watching the wrong player. If frames re-sort mid-fight, the glow
+  can stay on the old frame until combat ends (the game doesn't let addons see
+  which player a frame shows during combat)
+
 ## [2.0.0]
 
 - major refactor, now with visual PI notifications for raids and dungeons

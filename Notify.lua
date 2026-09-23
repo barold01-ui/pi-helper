@@ -232,6 +232,10 @@ local function EnableContainerOn(frame, unit)
     -- enabled-but-unbound (PI ready, cells found, yet no glow -- the reported bug).
     -- Bind once, then only toggle SetEnabled (combat-safe) for the PI gate.
     if container.piaUnit ~= unit then
+        -- A failed in-combat SetUnit would leave the engine on the OLD token --
+        -- which after a roster shift may be a different player -- while piaUnit
+        -- claims the new one. Go dark instead; PLAYER_REGEN_ENABLED rebinds.
+        if InCombatLockdown() then SetLive(container, false); return end
         if container.SetEnabled then pcall(container.SetEnabled, container, true) end
         container.piaUnit = unit
         if container.SetUnit then pcall(container.SetUnit, container, unit) end
@@ -250,6 +254,7 @@ end
 
 local keptFrames = {}
 local watchedSet = {}
+local resolvedSet = {}
 function PI:RefreshGlow()
     queued = false
     if PI.effectTesting then return end   -- test preview owns the cell glow
@@ -262,24 +267,28 @@ function PI:RefreshGlow()
     wipe(watchedSet)
     for i = 1, #units do watchedSet[units[i]] = true end
     wipe(keptFrames)
+    wipe(resolvedSet)
     -- One container per watched unit's cell (raid: your 1 target; dungeon-alldps:
     -- every DPS cell). watchSelf with no cell falls back to a standalone box.
     for i = 1, #units do
         local frame = PI:FindUnitFrame(units[i])
         if not frame and PI.watchSelf then frame = SelfTestFrame() end
+        if frame then resolvedSet[units[i]] = true end
         if frame and not keptFrames[frame] then
             keptFrames[frame] = true
             EnableContainerOn(frame, units[i])
         end
     end
-    -- Disable a container only if its unit is no longer watched. A watched unit
-    -- whose cell we couldn't find this pass (e.g. the finder can't scan in
+    -- Disable every container we didn't just use, with one exception: a watched
+    -- unit whose cell we couldn't find this pass (e.g. the finder can't scan in
     -- combat) KEEPS its existing container live rather than flapping the glow
-    -- off -- the container is a child of the cell, so it stays put regardless.
+    -- off. If the unit's cell WAS found -- on a different frame -- this container
+    -- sits on a stale cell that the frame addon has since handed to someone else
+    -- (re-sort, group move), so leaving it live glows that other player's cell.
     for frame, container in pairs(containers) do
         if not keptFrames[frame] then
             local u = container.piaUnit
-            if not (u and watchedSet[u]) then SetLive(container, false) end
+            if not (u and watchedSet[u] and not resolvedSet[u]) then SetLive(container, false) end
         end
     end
 end
