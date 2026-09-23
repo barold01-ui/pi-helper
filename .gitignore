@@ -5,3 +5,11 @@ PIHelper/
 
 # Editor/refactor leftovers from the 1.6.0 module split.
 *.bak
+
+# Dev-only files -- the repo holds only what the CurseForge build ships
+# (plus .pkgmeta/.gitignore/CHANGELOG.md). These stay local.
+.claude/
+CLAUDE.md
+check.lua
+Sounds.lua
+CHANGES.txt
