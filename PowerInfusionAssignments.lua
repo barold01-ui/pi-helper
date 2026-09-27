@@ -155,10 +155,22 @@ function PI:InitDB()
     PowerInfusionAssignmentsDB.optionsScale = PowerInfusionAssignmentsDB.optionsScale or 1
     if PowerInfusionAssignmentsDB.showForNonPriest == nil then PowerInfusionAssignmentsDB.showForNonPriest = false end
     if PowerInfusionAssignmentsDB.lockFrame == nil then PowerInfusionAssignmentsDB.lockFrame = true end
+    PowerInfusionAssignmentsDB.mouseoverTargets = PowerInfusionAssignmentsDB.mouseoverTargets or {}
     PI:InitTrackingDB()
 
     PI:SetIdentity(UnitFullName("player"))
     PI.playerIsPriest = select(2, UnitClass("player")) == "PRIEST"
+
+    -- Restore the mode 2 target saved by PI_SetPITarget. Also seed
+    -- previousTarget so the first scan after a reload isn't treated as a
+    -- change of target (which would re-send the "PI set to you" whisper).
+    local saved = PowerInfusionAssignmentsDB.mouseoverTargets[PI:GetPlayerName()]
+    if saved and saved ~= "" then
+        PI.mouseoverTarget = saved
+        if PowerInfusionAssignmentsDB.piMode == 2 then
+            PI.previousTarget = saved
+        end
+    end
 end
 
 function PI:SetTestMode(enabled)

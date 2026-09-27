@@ -2,6 +2,13 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.2]
+
+- your PI target now survives a /reload or relog when using "My PI target is
+  *not* set in a macro" mode. Previously the target set with the mouseover macro
+  was forgotten on reload and had to be set again. It's remembered per
+  character, and reloading no longer re-sends the "PI set to you" whisper
+
 ## [2.0.1]
 
 - fixed cooldown alerts glowing a second, wrong player's frame. When your raid

@@ -59,6 +59,8 @@ function PI_SetPITarget()
         return
     end
     PI.mouseoverTarget = name
+    -- Persisted per character so the target survives a /reload or relog
+    PowerInfusionAssignmentsDB.mouseoverTargets[PI:GetPlayerName()] = name
     print("PI target set to: "..PI:ShortName(name))
 end
 
