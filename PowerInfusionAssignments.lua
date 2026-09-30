@@ -79,10 +79,16 @@ end
 local scanTicker = nil
 
 -- Several priests broadcasting inside the same tick would each rebuild the
--- whole display. Coalesce them into one rebuild on the next frame.
+-- whole display. Coalesce them into one rebuild on the next frame. While the
+-- panel is hidden (most of the time for a non-priest) the rebuild is skipped
+-- and just flagged; the panel's OnShow does it when it next appears.
 local updateQueued = false
 local function RunQueuedUpdate()
     updateQueued = false
+    if PI.frame and not PI.frame:IsShown() then
+        PI.panelDirty = true
+        return
+    end
     PI:UpdateAssignmentFrame()
 end
 
@@ -395,7 +401,8 @@ f:RegisterEvent("CHAT_MSG_INSTANCE_CHAT")
 f:RegisterEvent("CHAT_MSG_INSTANCE_CHAT_LEADER")
 f:RegisterEvent("CHAT_MSG_RAID")
 f:RegisterEvent("CHAT_MSG_RAID_LEADER")
-f:RegisterEvent("ZONE_CHANGED")
+-- Only NEW_AREA: plain ZONE_CHANGED is a subzone change, which fires
+-- constantly while moving and never changes the zone we compare against.
 f:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 -- Player-only: own spec is readable, party/raid spec payloads are secret in combat.
 f:RegisterUnitEvent("PLAYER_SPECIALIZATION_CHANGED", "player")
@@ -408,6 +415,33 @@ local function RefreshNotify()
     if PI.QueueGlowUpdate then PI:QueueGlowUpdate() end
 end
 
+-- GROUP_ROSTER_UPDATE arrives in bursts (a raid forming fires it many times a
+-- second) and also for role changes and people going offline. Handle a burst
+-- as one pass, and only force a re-broadcast when someone actually joined:
+-- every priest does this, so forcing it on each event floods the prefix.
+local ROSTER_DELAY = 0.5
+local rosterQueued = false
+local announcedTo = {}   -- members we've already sent our assignment to
+
+local function RunRosterUpdate()
+    rosterQueued = false
+    PI:RefreshRoster()
+    PI:CleanupStaleAssignments()
+    PI:RequestFrameUpdate()
+    PI:UpdateAssignmentFrameVisibility()
+    PI:UpdateTickerState()
+    RefreshNotify()
+    if not IsInRaid() then
+        wipe(announcedTo)
+        return
+    end
+    -- Broadcast current assignment to new group members
+    if PI:TakeNewMembers(announcedTo) and PI.playerIsPriest
+       and not PowerInfusionAssignmentsDB.testMode then
+        PI:BroadcastAssignment(true)
+    end
+end
+
 f:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
         C_ChatInfo.RegisterAddonMessagePrefix(PI_MSG_PREFIX)
@@ -415,15 +449,16 @@ f:SetScript("OnEvent", function(self, event, ...)
         print("[PI] To configure Power Infusion Assignment Helper, type /pi")
         PI:RefreshRoster()
         PI:CreateAssignmentFrame()
-        PI:CreateOptionsWindow()
         PI:UpdateAssignmentFrame()
         PI:UpdateAssignmentFrameVisibility()
         -- Start ticker only if in raid or test mode
         PI:UpdateTickerState()
         RefreshNotify()
         -- First install: open the options window (defaults to the Setup Guide)
-        -- so a new user isn't left guessing. Only ever happens once.
-        if PI.firstRun and PI.options then
+        -- so a new user isn't left guessing. Only ever happens once. Otherwise
+        -- the window isn't built until /pi first opens it.
+        if PI.firstRun then
+            PI:CreateOptionsWindow()
             PI.options:Show()
         end
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -461,23 +496,18 @@ f:SetScript("OnEvent", function(self, event, ...)
         local prefix, message, channel, sender = ...
         PI:OnAddonMessage(prefix, message, channel, sender)
     elseif event == "GROUP_ROSTER_UPDATE" then
-        -- Fires several times in a row when a raid forms up
-        PI:RefreshRoster()
-        PI:CleanupStaleAssignments()
-        PI:RequestFrameUpdate()
-        PI:UpdateAssignmentFrameVisibility()
-        PI:UpdateTickerState()
-        RefreshNotify()
-        -- Broadcast current assignment to new group members
-        if PI.playerIsPriest and IsInRaid() and not PowerInfusionAssignmentsDB.testMode then
-            PI:BroadcastAssignment(true)
+        if not rosterQueued then
+            rosterQueued = true
+            C_Timer.After(ROSTER_DELAY, RunRosterUpdate)
         end
     elseif event == "CHAT_MSG_INSTANCE_CHAT" or event == "CHAT_MSG_INSTANCE_CHAT_LEADER"
         or event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER" then
         local message, sender = ...
         PI:OnChatMessage(message, sender)
-    elseif event == "ZONE_CHANGED" or event == "ZONE_CHANGED_NEW_AREA" then
-        PI:RefreshRoster()
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        -- Only zones change on a zone-in; RefreshZones falls back to a full
+        -- rebuild itself if the raid's size moved.
+        PI:RefreshZones()
         PI:CleanupStaleAssignments()
         PI:RequestFrameUpdate()
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then

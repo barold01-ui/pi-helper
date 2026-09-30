@@ -2,6 +2,25 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.3]
+
+- cooldown alerts now fire for Retribution paladins using the Radiant Glory
+  talent. Its Avenging Wrath (from Wake of Ashes) is a different buff from the
+  normal one, so those paladins never lit up. It has its own checkbox in the
+  Tracking tab, labelled "Avenging Wrath (Radiant Glory)"
+- performance: much less background work, especially for non-healers and in
+  big raids. Raid-frame changes and nameplates no longer wake the cooldown
+  alerts unless you're actually using them, roster changes are handled once
+  per burst instead of per event, and priests no longer re-send their
+  assignment every time anyone in the raid changes role or goes offline
+- the cooldown alert's pulse no longer restarts every time the raid frames
+  re-sort out of combat
+- the options window is now built the first time you open it rather than at
+  login
+- /pi debug logs are clearer: they show which player each alert is watching
+  and when it turns on or off, and no longer report a "tracked buff DETECTED"
+  when nothing was detected
+
 ## [2.0.2]
 
 - your PI target now survives a /reload or relog when using "My PI target is

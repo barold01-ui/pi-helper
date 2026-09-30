@@ -26,6 +26,7 @@ local rosterCount = 0
 -- "raid1".."raid40", built once instead of concatenating them every pass.
 local RAID_UNITS = {}
 for i = 1, 40 do RAID_UNITS[i] = "raid"..i end
+local PARTY_UNITS = { "party1", "party2", "party3", "party4" }
 
 -- Resolved once at login; every stored name is qualified against this realm.
 local myFullName = nil
@@ -181,6 +182,19 @@ function PI:RefreshZones()
     end
 end
 
+-- True if the group has anyone not in `seen`, then makes `seen` the current
+-- group. The caller owns `seen`; it's how a roster update tells a real join
+-- (or a reconnect) apart from a role change or someone going offline.
+function PI:TakeNewMembers(seen)
+    local new = false
+    for name in pairs(groupMembers) do
+        if not seen[name] then new = true; break end
+    end
+    wipe(seen)
+    for name in pairs(groupMembers) do seen[name] = true end
+    return new
+end
+
 function PI:GetClassColorForName(name)
     if not name or name == "" then return nil end
     return classColorCache[name]
@@ -243,12 +257,12 @@ function PI:GetUnitTokenForName(fullName)
     if not fullName or fullName == "" then return nil end
     if fullName == PI:GetPlayerName() then return "player" end
     for i = 1, rosterCount do
-        if rosterNames[i] == fullName then return "raid"..i end
+        if rosterNames[i] == fullName then return RAID_UNITS[i] end
     end
     -- rosterNames only covers a raid; in a 5-man party match the party units.
     if IsInGroup() and not IsInRaid() then
         for i = 1, 4 do
-            local u = "party"..i
+            local u = PARTY_UNITS[i]
             if UnitExists(u) and PI:GetUnitName(u) == fullName then return u end
         end
     end

@@ -225,6 +225,12 @@ function PI:CreateAssignmentFrame()
     f.flashElapsed = 0
     f.flashVisible = true
 
+    -- Queued updates are skipped while the panel is hidden (see
+    -- RequestFrameUpdate), so catch up the moment it's shown again.
+    f:SetScript("OnShow", function()
+        if PI.panelDirty then PI:UpdateAssignmentFrame() end
+    end)
+
     f:Show()
     PI.frame = f
     PI:UpdateAssignmentFrame()
@@ -244,14 +250,15 @@ end
 
 -- Two separate problems, both of which mean a priest is going to waste a PI:
 -- the target has left the raid, or they're in a different zone to us.
-function PI:CheckTargetProblems()
+function PI:CheckTargetProblems(myZone)
     if PowerInfusionAssignmentsDB.testMode then return false, false end
+    myZone = myZone or GetZoneText() or ""
     local missing, wrongZone = false, false
     for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if target and target ~= "" then
             if not PI:IsPlayerInGroup(target) then
                 missing = true
-            elseif not PI:IsPlayerInSameZone(target) then
+            elseif not PI:IsPlayerInZone(target, myZone) then
                 wrongZone = true
             end
         end
@@ -358,6 +365,7 @@ end
 
 function PI:UpdateAssignmentFrame()
     PI:CreateAssignmentFrame()
+    PI.panelDirty = false
     -- Make test mode obvious: recolour the header and tag it while it's on.
     if PowerInfusionAssignmentsDB.testMode then
         PI.frame.header:SetText("POWER INFUSION  |cffFF7B72(TEST MODE)|r")
@@ -368,6 +376,7 @@ function PI:UpdateAssignmentFrame()
     end
     reuseRowCount = 0
     local myName = PI:GetPlayerName()
+    local myZone = GetZoneText() or ""
 
     -- First add the local player's assignment at the top (only if priest)
     if PI.playerIsPriest then
@@ -376,7 +385,7 @@ function PI:UpdateAssignmentFrame()
 
     -- Then add other players' assignments
     for player, target in pairs(PowerInfusionAssignmentsDB.assignments) do
-        if player ~= myName and target and target ~= "" and (PowerInfusionAssignmentsDB.testMode or PI:IsPlayerInSameZone(player)) then
+        if player ~= myName and target and target ~= "" and (PowerInfusionAssignmentsDB.testMode or PI:IsPlayerInZone(player, myZone)) then
             PushRow(PI:ShortName(player), target, false)
         end
     end
@@ -396,7 +405,7 @@ function PI:UpdateAssignmentFrame()
     if instanceType == "raid" or PI.debugging then
         hasDuplicates = PI:CheckForDuplicateTargets()
         hasRoleWarning = PI:CheckForRoleWarnings()
-        targetMissing, targetsNotInZone = PI:CheckTargetProblems()
+        targetMissing, targetsNotInZone = PI:CheckTargetProblems(myZone)
     end
 
     wipe(reuseErrorLines)

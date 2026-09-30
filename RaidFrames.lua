@@ -91,11 +91,58 @@ local function DirectLookup(unit)
     return nil
 end
 
--- Feed every candidate cell of the active frame addons to `visit`. Kept to the
--- addons we support; Blizzard is skipped when a replacement addon is loaded.
-local function ForEachCandidate(visit)
-    local function try(frame) if frame then visit(frame) end end
+-- Global frame names the scan looks up, built once at load rather than
+-- concatenated on every scan (VuhDo alone is 510 names).
+local function Names(fmt, a, b)
+    local t = {}
+    for i = 1, a do
+        if b then
+            for j = 1, b do t[#t + 1] = string.format(fmt, i, j) end
+        else
+            t[#t + 1] = string.format(fmt, i)
+        end
+    end
+    return t
+end
+local BLIZZ_NAMES = Names("CompactRaidFrame%d", 40)
+for _, n in ipairs(Names("CompactRaidGroup%dMember%d", 8, 5)) do BLIZZ_NAMES[#BLIZZ_NAMES + 1] = n end
+for _, n in ipairs(Names("CompactPartyFrameMember%d", 5)) do BLIZZ_NAMES[#BLIZZ_NAMES + 1] = n end
+local ERF_GROUP_NAMES = Names("ERFGroupHeader%d", 8)
+local VUHDO_NAMES = Names("Vd%dH%d", 10, 51)
+local CHILD_KEYS = Names("child%d", 40)
 
+-- The scan's state lives in upvalues so a scan builds no closures. `Try` is
+-- also what Blizzard's ApplyToFrames calls back, so it has to be a plain
+-- function of the frame.
+local scanUnit, scanFound
+
+local function Try(frame)
+    if scanFound or not frame then return end
+    if Forbidden(frame) or not Visible(frame) then return end
+    if FrameShowsUnit(frame, scanUnit) then scanFound = frame end
+end
+
+local function TryNames(names)
+    for i = 1, #names do
+        if scanFound then return end
+        Try(_G[names[i]])
+    end
+end
+
+-- DandersFrames: headers keyed by "childN"
+local function WalkHeader(header, n)
+    if not header or not header.GetAttribute then return end
+    for i = 1, n do
+        if scanFound then return end
+        local ok, child = pcall(header.GetAttribute, header, CHILD_KEYS[i])
+        if ok and child then Try(child) end
+    end
+end
+
+-- Offer every candidate cell of the active frame addons to Try, stopping at
+-- the first match. Kept to the addons we support; Blizzard is skipped when a
+-- replacement addon is loaded.
+local function ScanCandidates()
     local replaced = _G.DandersFrames or _G.ElvUF_Raid1 or _G.Grid2Frame
         or (_G.EllesmereUI or _G.ERFFlatHeader or _G.ERFGroupHeader1)
         or _G.VUHDO_UNIT_BUTTONS or (_G.Cell and _G.Cell.unitButtons)
@@ -103,67 +150,63 @@ local function ForEachCandidate(visit)
     -- Blizzard compact frames
     if not replaced then
         if CompactRaidFrameContainer and CompactRaidFrameContainer.ApplyToFrames then
-            pcall(CompactRaidFrameContainer.ApplyToFrames, CompactRaidFrameContainer, "normal", try)
+            pcall(CompactRaidFrameContainer.ApplyToFrames, CompactRaidFrameContainer, "normal", Try)
         end
         if CompactPartyFrame and CompactPartyFrame.ApplyToFrames then
-            pcall(CompactPartyFrame.ApplyToFrames, CompactPartyFrame, "normal", try)
+            pcall(CompactPartyFrame.ApplyToFrames, CompactPartyFrame, "normal", Try)
         end
-        for i = 1, 40 do try(_G["CompactRaidFrame" .. i]) end
-        for g = 1, 8 do for m = 1, 5 do try(_G["CompactRaidGroup" .. g .. "Member" .. m]) end end
-        for i = 1, 5 do try(_G["CompactPartyFrameMember" .. i]) end
+        TryNames(BLIZZ_NAMES)
     end
+    if scanFound then return end
 
-    -- DandersFrames: headers keyed by "childN"
     local DF = _G.DandersFrames
     if type(DF) == "table" then
-        local function walkHeader(header, n)
-            if not header or not header.GetAttribute then return end
-            for i = 1, (n or 40) do
-                local ok, child = pcall(header.GetAttribute, header, "child" .. i)
-                if ok and child then try(child) end
-            end
-        end
-        walkHeader(DF.partyHeader, 5)
-        walkHeader(DF.raidCombinedHeader, 40)
+        WalkHeader(DF.partyHeader, 5)
+        WalkHeader(DF.raidCombinedHeader, 40)
         if type(DF.raidSeparatedHeaders) == "table" then
-            for g = 1, 8 do walkHeader(DF.raidSeparatedHeaders[g], 5) end
+            for g = 1, 8 do WalkHeader(DF.raidSeparatedHeaders[g], 5) end
         end
-        if type(DF.raidFrames) == "table" then for i = 1, 40 do try(DF.raidFrames[i]) end end
-        if type(DF.partyFrames) == "table" then for i = 1, 5 do try(DF.partyFrames[i]) end end
+        if type(DF.raidFrames) == "table" then for i = 1, 40 do Try(DF.raidFrames[i]) end end
+        if type(DF.partyFrames) == "table" then for i = 1, 5 do Try(DF.partyFrames[i]) end end
     end
+    if scanFound then return end
 
     -- EllesmereUI raid frames
     local modules = _G.EllesmereUI and _G.EllesmereUI._ModuleNS
     local ns = modules and modules.EllesmereUIRaidFrames
     if ns and type(ns._euiUnitButtons) == "table" then
-        for frame in pairs(ns._euiUnitButtons) do try(frame) end
+        for frame in pairs(ns._euiUnitButtons) do Try(frame) end
     end
     if ns and type(ns._flatButtons) == "table" then
-        for i = 1, #ns._flatButtons do try(ns._flatButtons[i]) end
+        for i = 1, #ns._flatButtons do Try(ns._flatButtons[i]) end
     end
-    if _G.ERFFlatHeader then for i = 1, 40 do try(_G.ERFFlatHeader[i]) end end
+    if _G.ERFFlatHeader then for i = 1, 40 do Try(_G.ERFFlatHeader[i]) end end
     for g = 1, 8 do
-        local hdr = _G["ERFGroupHeader" .. g]
-        if hdr then for i = 1, 5 do try(hdr[i]) end end
+        local hdr = _G[ERF_GROUP_NAMES[g]]
+        if hdr then for i = 1, 5 do Try(hdr[i]) end end
     end
+    if scanFound then return end
 
     -- VuhDo heal buttons Vd<panel>H<button>
-    if _G.VUHDO_UNIT_BUTTONS or _G.Vd1 then
-        for p = 1, 10 do for b = 1, 51 do try(_G["Vd" .. p .. "H" .. b]) end end
-    end
+    if _G.VUHDO_UNIT_BUTTONS or _G.Vd1 then TryNames(VUHDO_NAMES) end
 end
 
 -- Scan candidates for the one that shows `unit`. Only reliable out of combat
 -- (frame unit tokens can be secret in combat).
 local function ScanForUnit(unit)
-    local found
-    ForEachCandidate(function(frame)
-        if found then return end
-        if Forbidden(frame) or not Visible(frame) then return end
-        if FrameShowsUnit(frame, unit) then found = frame end
-    end)
+    scanUnit, scanFound = unit, nil
+    ScanCandidates()
+    local found = scanFound
+    scanUnit, scanFound = nil, nil
     return found
 end
+
+-- A unit whose cell a full scan couldn't find is not scanned again for
+-- MISS_TTL seconds. Without this, a target with no cell on screen (frames
+-- hidden, unsupported frame addon) cost a full scan on every glow refresh.
+-- Short enough that a cell appearing later is still picked up promptly.
+local MISS_TTL = 2
+local missUntil = {}   -- unit token -> GetTime() the miss expires
 
 -- The raid/party cell currently showing `unit`, or nil. Cached; cache only
 -- rebuilds out of combat so a mid-fight secret token can't drop a known cell.
@@ -182,18 +225,20 @@ function PI:FindUnitFrame(unit)
         end
         frameCache[unit] = nil
     end
-    if InCombat() then
-        -- Can't scan in combat; direct maps are still safe.
-        local direct = DirectLookup(unit)
-        if direct then frameCache[unit] = direct end
-        return direct
+    -- Direct maps are cheap and safe in combat, so they're always tried.
+    local frame = DirectLookup(unit)
+    if not frame and not InCombat() then
+        local miss = missUntil[unit]
+        if miss and GetTime() < miss then return nil end
+        frame = ScanForUnit(unit)
+        missUntil[unit] = (not frame) and (GetTime() + MISS_TTL) or nil
     end
-    local frame = DirectLookup(unit) or ScanForUnit(unit)
     if frame then frameCache[unit] = frame end
     return frame
 end
 
 function PI:InvalidateFrameCache()
+    wipe(missUntil)
     if InCombat() then return end
     wipe(frameCache)
 end

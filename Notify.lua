@@ -40,6 +40,19 @@ local function FilterTable()
     return { includeSpellIDs = PI:GetTrackedSpellSet() }
 end
 
+-- Every setting the decoration reads, as one string. A container remembers the
+-- key it was last decorated with, so a refresh only redecorates (and restarts
+-- the pulse animation) after the user actually changed one of them.
+local function GlowStyleKey()
+    local db = PowerInfusionAssignmentsDB
+    local c = type(db.glowColor) == "table" and db.glowColor or {}
+    return strjoin("|", tostring(db.showCdIcon), tostring(db.iconType),
+        tostring(db.iconSize), tostring(db.iconX), tostring(db.iconY),
+        tostring(db.iconAlpha), tostring(db.iconCountdown), tostring(db.cdAnchor),
+        tostring(db.cdOutside), tostring(db.extraEffect), tostring(db.glowAlpha),
+        tostring(db.pixelThickness), tostring(c[1]), tostring(c[2]), tostring(c[3]))
+end
+
 -- The active notify mode for the current group context:
 --   raid  -> "assignment" if notifyOnCooldown, else "off"
 --   party -> the Dungeon Options setting ("off" | "assignment" | "alldps")
@@ -132,7 +145,13 @@ end
 
 local function SetLive(container, on)
     if not container then return end
-    container.piaLive = on and true or false
+    on = on and true or false
+    -- Logged on a change only: this runs every refresh with the same value.
+    -- Unit token only, never a name -- names can be secret in combat.
+    if container.piaLive ~= on and container.piaUnit then
+        PI:Debug("notify: alert on %s turned %s", container.piaUnit, on and "ON" or "OFF")
+    end
+    container.piaLive = on
     if container.SetEnabled then pcall(container.SetEnabled, container, on and true or false) end
 end
 
@@ -164,13 +183,13 @@ local function EnsureSlot(container, frame)
         candidateFilters = FilterTable(),
         initializeFrame = function(button)
             container.piaButton = button
-            -- Fires when the engine first creates the button for this cell, i.e.
-            -- a TRACKED buff (matching spell ID) actually appeared on this unit.
-            -- If this never logs during a run, nothing matched (e.g. NPC/creature
-            -- ability IDs differ from the player cooldown IDs we filter on) --
-            -- that means "not detected", not "engine failed".
-            PI:Debug("notify: tracked buff DETECTED on %s (aura button created)", tostring(container.piaUnit or "?"))
-            PI:DecorateGlowButton(button, frame)
+            -- Fires when the slot is set up (before any unit is bound), NOT when a
+            -- tracked buff appears -- the engine builds its button up front. It
+            -- used to be logged as a detection, which was misleading.
+            PI:Debug("notify: alert slot created on a new cell")
+            if PI:DecorateGlowButton(button, frame) then
+                container.piaStyleKey = GlowStyleKey()
+            end
         end,
     }
     local ok = pcall(container.AddAuraSlot, container, GROUP_KEY, HelpfulFilter(), opts)
@@ -179,10 +198,15 @@ local function EnsureSlot(container, frame)
     end
     if not ok then return false end
     container.piaHasSlot = true
+    container.piaFilterVersion = PI.trackedSetVersion
     return true
 end
 
+-- Only pushes a filter when the tracked set has changed since this container
+-- last got one; re-sending an identical filter each refresh is wasted work.
 local function UpdateFilters(container)
+    if container.piaFilterVersion == PI.trackedSetVersion then return end
+    container.piaFilterVersion = PI.trackedSetVersion
     local f = FilterTable()
     if container.SetAuraSlotCandidateFilters then
         pcall(container.SetAuraSlotCandidateFilters, container, GROUP_KEY, f)
@@ -235,8 +259,13 @@ local function EnableContainerOn(frame, unit)
         -- A failed in-combat SetUnit would leave the engine on the OLD token --
         -- which after a roster shift may be a different player -- while piaUnit
         -- claims the new one. Go dark instead; PLAYER_REGEN_ENABLED rebinds.
-        if InCombatLockdown() then SetLive(container, false); return end
+        if InCombatLockdown() then
+            PI:Debug("notify: can't move an alert to %s in combat; it stays off until combat ends", unit)
+            SetLive(container, false)
+            return
+        end
         if container.SetEnabled then pcall(container.SetEnabled, container, true) end
+        PI:Debug("notify: watching %s (%s)", unit, tostring(PI:ShortName(PI:GetUnitName(unit) or unit)))
         container.piaUnit = unit
         if container.SetUnit then pcall(container.SetUnit, container, unit) end
         if container.UpdateAllAuras then pcall(container.UpdateAllAuras, container) end
@@ -248,7 +277,10 @@ local function EnableContainerOn(frame, unit)
     -- so only do it OUT of combat, where those ops are allowed -- that is enough
     -- to apply a style/colour/size change the user made (always out of combat).
     if container.piaButton and not InCombatLockdown() then
-        PI:DecorateGlowButton(container.piaButton, frame)
+        local key = GlowStyleKey()
+        if container.piaStyleKey ~= key and PI:DecorateGlowButton(container.piaButton, frame) then
+            container.piaStyleKey = key
+        end
     end
 end
 
@@ -293,13 +325,27 @@ function PI:RefreshGlow()
     end
 end
 
+-- Whether a Blizzard cell changing unit is worth a glow refresh. The hook fires
+-- for every compact frame, so this filters out nameplates and anyone who isn't
+-- watching at all -- which is every non-healer, most of the time. Anything that
+-- turns watching back on (spec, options, group) queues its own refresh.
+local function CellChangeMatters(unit)
+    if type(unit) == "string" and not (issecretvalue and issecretvalue(unit))
+       and unit:find("nameplate", 1, true) then
+        return false
+    end
+    if PI.effectTesting then return true end
+    if not PI.watchSelf and PI:GetNotifyMode() == "off" then return false end
+    return WatchAllowed()
+end
+
 -- Re-resolve when Blizzard reassigns a cell's unit (raid re-sort, join/leave).
 local function HookCompact()
     if hookedCompact then return end
     if type(CompactUnitFrame_SetUnit) == "function" then
         hookedCompact = true
-        hooksecurefunc("CompactUnitFrame_SetUnit", function()
-            PI:QueueGlowUpdate()
+        hooksecurefunc("CompactUnitFrame_SetUnit", function(_, unit)
+            if CellChangeMatters(unit) then PI:QueueGlowUpdate() end
         end)
     end
 end
@@ -353,5 +399,11 @@ function PI:NotifyStatus()
     for i = 1, #units do
         local u = units[i]
         PI:Out(string.format("  watch %s (%s) cellFound=%s", u, tostring(PI:ShortName(PI:GetUnitName(u) or u)), yn(PI:FindUnitFrame(u))))
+    end
+    -- What the engine side is actually doing, which can lag the list above:
+    -- an alert still bound to an old unit, or off while PI is on cooldown.
+    for _, container in pairs(containers) do
+        PI:Out(string.format("  alert bound=%s on=%s buttonMade=%s",
+            tostring(container.piaUnit or "none"), yn(container.piaLive), yn(container.piaButton)))
     end
 end

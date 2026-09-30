@@ -347,7 +347,8 @@ end
 
 -- Attach or refresh the alert on an aura button, covering `cell`. Called when the
 -- engine first builds the button (initializeFrame; button not yet forbidden) and
--- again out of combat, so style/size/anchor changes take hold.
+-- again out of combat, so style/size/anchor changes take hold. Returns true
+-- once the alert is drawn, so the caller knows this style is now applied.
 function PI:DecorateGlowButton(button, cell)
     if not button or Forbidden(button) then return end
     if not cell or Forbidden(cell) then return end
@@ -390,6 +391,7 @@ function PI:DecorateGlowButton(button, cell)
     end
 
     BindCountdown(button, holder)
+    return true
 end
 
 -- ===== Standalone preview hosts for the Effect TEST preview (no aura engine).

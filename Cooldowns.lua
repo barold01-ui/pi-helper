@@ -12,7 +12,9 @@ local _, PI = ...
 
 -- Ordered so the Tracking tab lists classes alphabetically, specs within class
 -- in their in-game order. Each entry: class file, spec name, spec id, and the
--- cooldowns as { spellID, fallbackName } pairs.
+-- cooldowns as { spellID, fallbackName } pairs. A talent that swaps in a buff
+-- under the same name adds { ..., talentID, fallbackTalentName } so the
+-- Tracking tab can tell the two apart (see PI:GetCatalogCdName).
 PI.TRACK_CATALOG = {
     { class = "DEATHKNIGHT", spec = "Frost",         specID = 251,  cds = { {51271, "Pillar of Frost"} } },
     { class = "DEATHKNIGHT", spec = "Unholy",        specID = 252,  cds = { {42650, "Army of the Dead"} } },
@@ -28,7 +30,7 @@ PI.TRACK_CATALOG = {
     { class = "MAGE",        spec = "Fire",          specID = 63,   cds = { {190319, "Combustion"} } },
     { class = "MAGE",        spec = "Frost",         specID = 64,   cds = { {1247908, "Splinterstorm"} } },
     { class = "MONK",        spec = "Windwalker",    specID = 269,  cds = { {1249625, "Zenith"}, {1248992, "Celestial Conduit"} } },
-    { class = "PALADIN",     spec = "Retribution",   specID = 70,   cds = { {31884, "Avenging Wrath"} } },
+    { class = "PALADIN",     spec = "Retribution",   specID = 70,   cds = { {31884, "Avenging Wrath"}, {454351, "Avenging Wrath", 458359, "Radiant Glory"} } },
     { class = "PRIEST",      spec = "Shadow",        specID = 258,  cds = { {194249, "Voidform"} } },
     { class = "ROGUE",       spec = "Assassination", specID = 259,  cds = { {1249810, "Deathmark"} } },
     { class = "ROGUE",       spec = "Outlaw",        specID = 260,  cds = { {13750, "Adrenaline Rush"} } },
@@ -51,6 +53,16 @@ function PI:GetSpellDisplayName(spellID, fallback)
         if ok and type(name) == "string" and name ~= "" then return name end
     end
     return fallback or ("Spell "..tostring(spellID))
+end
+
+-- Label for one catalog cooldown: the spell name, plus the talent's name when
+-- the entry is a talent variant ("Avenging Wrath (Radiant Glory)").
+function PI:GetCatalogCdName(cd)
+    local name = PI:GetSpellDisplayName(cd[1], cd[2])
+    if cd[3] then
+        name = name.." ("..PI:GetSpellDisplayName(cd[3], cd[4])..")"
+    end
+    return name
 end
 
 -- Saved-variable defaults for tracking. Called from PI:InitDB.
@@ -135,11 +147,27 @@ function PI:SetSpellTracked(spellID, enabled)
     else
         t[spellID] = false
     end
+    PI:InvalidateTrackedSpellSet()
+end
+
+-- The set is rebuilt only when one of the setters here changes it, since the
+-- glow refresh asks for it several times a pass. A rebuild makes a NEW table
+-- rather than refilling the old one: the aura engine may hold on to the one
+-- it was given as a filter. PI.trackedSetVersion lets the engine side tell
+-- that its filter is stale without comparing sets.
+local trackedSet
+PI.trackedSetVersion = 0
+
+function PI:InvalidateTrackedSpellSet()
+    trackedSet = nil
+    PI.trackedSetVersion = PI.trackedSetVersion + 1
 end
 
 -- The flat { [spellID] = true } set the detection engine filters on: every
--- enabled catalog cooldown plus every custom ID.
+-- enabled catalog cooldown plus every custom ID. Shared and cached, so callers
+-- must not modify it.
 function PI:GetTrackedSpellSet()
+    if trackedSet then return trackedSet end
     local set = {}
     for i = 1, #PI.TRACK_CATALOG do
         local cds = PI.TRACK_CATALOG[i].cds
@@ -155,6 +183,7 @@ function PI:GetTrackedSpellSet()
             if type(id) == "number" then set[id] = true end
         end
     end
+    trackedSet = set
     return set
 end
 
@@ -168,6 +197,7 @@ function PI:AddCustomSpell(spellID)
         if custom[i] == spellID then return false end
     end
     custom[#custom + 1] = spellID
+    PI:InvalidateTrackedSpellSet()
     return true
 end
 
@@ -178,4 +208,5 @@ function PI:RemoveCustomSpell(spellID)
     for i = #custom, 1, -1 do
         if custom[i] == spellID then table.remove(custom, i) end
     end
+    PI:InvalidateTrackedSpellSet()
 end

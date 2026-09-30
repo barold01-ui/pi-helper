@@ -1119,7 +1119,7 @@ function PI:CreateOptionsWindow()
         else
             for j = 1, #entry.cds do
                 local cd = entry.cds[j]
-                TrackCheck(cd[1], PI:GetSpellDisplayName(cd[1], cd[2]), x + 8, cy)
+                TrackCheck(cd[1], PI:GetCatalogCdName(cd), x + 8, cy)
                 cy = cy + CHECK_H
             end
         end
