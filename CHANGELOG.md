@@ -2,6 +2,10 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.4]
+
+- updated for game version 12.1.5 (interface 120105)
+
 ## [2.0.3]
 
 - cooldown alerts now fire for Retribution paladins using the Radiant Glory
