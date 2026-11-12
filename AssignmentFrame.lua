@@ -6,6 +6,41 @@ local _, PI = ...
 local reuseErrorLines = {}
 local reuseTargetCounts = {}
 
+-- Who each warning is about. Filled by the Check* functions below and read
+-- straight back by UpdateAssignmentFrame; an empty list means no warning.
+local dupeTargets = {}
+local roleTargets = {}
+local missingTargets = {}
+local wrongZoneTargets = {}
+local reuseNameSeen = {}
+local reuseNameOut = {}
+
+-- "Bob", "Bob and Alice", "Bob, Alice and Carl". Sorted, because the lists
+-- are built from pairs() and the text would otherwise reshuffle (and redraw)
+-- between ticks for no reason.
+local function JoinNames(list)
+    wipe(reuseNameOut)
+    for i = 1, #list do reuseNameOut[i] = PI:ShortName(list[i]) end
+    table.sort(reuseNameOut)
+    local n = #reuseNameOut
+    if n == 1 then return reuseNameOut[1] end
+    return table.concat(reuseNameOut, ", ", 1, n - 1) .. " and " .. reuseNameOut[n]
+end
+
+-- Each target goes in a list at most once, even if two priests share them.
+local function AddName(list, name)
+    if not reuseNameSeen[list] then reuseNameSeen[list] = {} end
+    local seen = reuseNameSeen[list]
+    if seen[name] then return end
+    seen[name] = true
+    list[#list + 1] = name
+end
+
+local function ResetList(list)
+    wipe(list)
+    if reuseNameSeen[list] then wipe(reuseNameSeen[list]) end
+end
+
 -- The panel is drawn from row descriptors rather than one concatenated string,
 -- so these are the two halves of the display diff: reuseRows is rebuilt every
 -- update, lastRows mirrors what is actually on screen. Both hold the same
@@ -20,7 +55,7 @@ local function FlashOnUpdate(self, elapsed)
     if self.flashElapsed >= 0.5 then
         self.flashElapsed = 0
         self.flashVisible = not self.flashVisible
-        self.warningIconTop:SetAlpha(self.flashVisible and 1 or 0.2)
+        self.warningIcon:SetAlpha(self.flashVisible and 1 or 0.2)
     end
 end
 
@@ -44,6 +79,8 @@ local PANEL = {
     leaderInset = 5,    -- clear space each side of the leader line
     leaderMin   = 10,   -- shortest leader run a row is allowed to squeeze to
     errorGap    = 6,
+    warnIcon    = 24,   -- flashing alert icon to the left of the warnings
+    warnIconGap = 4,    -- icon to warning text
     fontRow     = 14,
     fontHeader  = 10,
     fontError   = 12,
@@ -212,13 +249,13 @@ function PI:CreateAssignmentFrame()
 
     f.rows = {}
 
-    -- Warning icon for issues (top)
-    local warningIconTop = f:CreateTexture(nil, "OVERLAY")
-    warningIconTop:SetSize(80, 80)
-    warningIconTop:SetPoint("BOTTOM", f, "TOP", 0, -15)
-    warningIconTop:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
-    warningIconTop:Hide()
-    f.warningIconTop = warningIconTop
+    -- Flashing alert icon, sat to the left of the warning lines. Anchored by
+    -- the layout pass alongside errorText.
+    local warningIcon = f:CreateTexture(nil, "OVERLAY")
+    warningIcon:SetSize(PANEL.warnIcon, PANEL.warnIcon)
+    warningIcon:SetTexture("Interface\\DialogFrame\\DialogAlertIcon")
+    warningIcon:Hide()
+    f.warningIcon = warningIcon
 
     -- Flash animation state. The OnUpdate handler is only attached while the
     -- icon is up, so the frame costs nothing per frame the rest of the time.
@@ -237,49 +274,53 @@ function PI:CreateAssignmentFrame()
     PI:UpdateFrameLock()
 end
 
+-- Returns the list of targets assigned to more than one priest.
 function PI:CheckForDuplicateTargets()
     wipe(reuseTargetCounts)
+    ResetList(dupeTargets)
     for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if target and target ~= "" then
-            if reuseTargetCounts[target] then return true, target end
+            if reuseTargetCounts[target] then AddName(dupeTargets, target) end
             reuseTargetCounts[target] = true
         end
     end
-    return false, nil
+    return dupeTargets
 end
 
 -- Two separate problems, both of which mean a priest is going to waste a PI:
 -- the target has left the raid, or they're in a different zone to us.
+-- Returns the two lists of targets.
 function PI:CheckTargetProblems(myZone)
-    if PowerInfusionAssignmentsDB.testMode then return false, false end
+    ResetList(missingTargets)
+    ResetList(wrongZoneTargets)
+    if PowerInfusionAssignmentsDB.testMode then return missingTargets, wrongZoneTargets end
     myZone = myZone or GetZoneText() or ""
-    local missing, wrongZone = false, false
     for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if target and target ~= "" then
             if not PI:IsPlayerInGroup(target) then
-                missing = true
+                AddName(missingTargets, target)
             elseif not PI:IsPlayerInZone(target, myZone) then
-                wrongZone = true
+                AddName(wrongZoneTargets, target)
             end
         end
     end
-    return missing, wrongZone
+    return missingTargets, wrongZoneTargets
 end
 
+-- Returns the list of targets who are healers or tanks.
 function PI:CheckForRoleWarnings()
+    ResetList(roleTargets)
     for _, target in pairs(PowerInfusionAssignmentsDB.assignments) do
         if target and target ~= "" then
             local role = PI:GetRoleForName(target)
-            if role == "HEALER" or role == "TANK" then
-                return true
-            end
             -- In test mode, simulate a role warning for Tankwarrior (tank)
-            if PowerInfusionAssignmentsDB.testMode and PI:ShortName(target) == "Tankwarrior" then
-                return true
+            if role == "HEALER" or role == "TANK"
+               or (PowerInfusionAssignmentsDB.testMode and PI:ShortName(target) == "Tankwarrior") then
+                AddName(roleTargets, target)
             end
         end
     end
-    return false
+    return roleTargets
 end
 
 -- Writes the row descriptors onto the pooled row frames and hides the surplus.
@@ -330,11 +371,24 @@ function PI:LayoutAssignmentFrame()
         height = height + reuseRowCount * PANEL.rowH + (reuseRowCount - 1) * PANEL.rowGap
     end
 
-    if f.errorText:GetText() ~= "" then
-        f.errorText:SetWidth(width - PANEL.padX * 2)
+    -- GetText() hands back nil, not "", once the text is cleared.
+    local errText = f.errorText:GetText()
+    if errText and errText ~= "" then
+        -- Icon on the left, text beside it; whichever is taller sets the
+        -- block's height and the other is centred against it.
+        local textX = PANEL.padX + PANEL.warnIcon + PANEL.warnIconGap
+        f.errorText:SetWidth(width - textX - PANEL.padX)
+        local textH = math.ceil(f.errorText:GetStringHeight() or 0)
+        local blockH = math.max(textH, PANEL.warnIcon)
+        local top = height + PANEL.errorGap
+
         f.errorText:ClearAllPoints()
-        f.errorText:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL.padX, -(height + PANEL.errorGap))
-        height = height + PANEL.errorGap + math.ceil(f.errorText:GetStringHeight() or 0)
+        f.errorText:SetPoint("TOPLEFT", f, "TOPLEFT", textX,
+            -(top + math.floor((blockH - textH) / 2)))
+        f.warningIcon:ClearAllPoints()
+        f.warningIcon:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL.padX,
+            -(top + math.floor((blockH - PANEL.warnIcon) / 2)))
+        height = top + blockH
     end
 
     f:SetSize(width, height + PANEL.padBottom)
@@ -402,24 +456,32 @@ function PI:UpdateAssignmentFrame()
     -- This is why nothing fires while the raid is still forming up.
     -- /pi debug lifts the gate so the warnings can be exercised anywhere.
     local _, instanceType = GetInstanceInfo()
-    if instanceType == "raid" or PI.debugging then
-        hasDuplicates = PI:CheckForDuplicateTargets()
-        hasRoleWarning = PI:CheckForRoleWarnings()
-        targetMissing, targetsNotInZone = PI:CheckTargetProblems(myZone)
-    end
-
     wipe(reuseErrorLines)
-    if hasDuplicates then
-        reuseErrorLines[#reuseErrorLines + 1] = "Duplicate PI targets!"
-    end
-    if hasRoleWarning then
-        reuseErrorLines[#reuseErrorLines + 1] = "PI assigned to HEALER or TANK!"
-    end
-    if targetMissing then
-        reuseErrorLines[#reuseErrorLines + 1] = "One or more PI targets are not in the raid!"
-    end
-    if targetsNotInZone then
-        reuseErrorLines[#reuseErrorLines + 1] = "One or more PI targets are in a different zone!"
+    if instanceType == "raid" or PI.debugging then
+        local dupes = PI:CheckForDuplicateTargets()
+        local roles = PI:CheckForRoleWarnings()
+        local missing, wrongZone = PI:CheckTargetProblems(myZone)
+        hasDuplicates = #dupes > 0
+        hasRoleWarning = #roles > 0
+        targetMissing = #missing > 0
+        targetsNotInZone = #wrongZone > 0
+
+        -- "is"/"are" keyed off the count so one name reads as a sentence.
+        if hasDuplicates then
+            reuseErrorLines[#reuseErrorLines + 1] = JoinNames(dupes)
+                .. (#dupes == 1 and " is" or " are") .. " assigned to more than one priest!"
+        end
+        if hasRoleWarning then
+            reuseErrorLines[#reuseErrorLines + 1] = "PI assigned to HEALER or TANK: " .. JoinNames(roles) .. "!"
+        end
+        if targetMissing then
+            reuseErrorLines[#reuseErrorLines + 1] = JoinNames(missing)
+                .. (#missing == 1 and " is" or " are") .. " not in the raid!"
+        end
+        if targetsNotInZone then
+            reuseErrorLines[#reuseErrorLines + 1] = JoinNames(wrongZone)
+                .. (#wrongZone == 1 and " is" or " are") .. " in a different zone!"
+        end
     end
 
     -- Diff against what is on screen rather than rebuilding a string to
@@ -454,14 +516,14 @@ function PI:UpdateAssignmentFrame()
     -- Show/hide warning icon. Only touched on a transition so the flash keeps
     -- its rhythm instead of restarting on every update.
     local hasWarning = hasDuplicates or hasRoleWarning or targetMissing or targetsNotInZone
-    if hasWarning and not PI.frame.warningIconTop:IsShown() then
+    if hasWarning and not PI.frame.warningIcon:IsShown() then
         PI.frame.flashElapsed = 0
         PI.frame.flashVisible = true
-        PI.frame.warningIconTop:SetAlpha(1)
-        PI.frame.warningIconTop:Show()
+        PI.frame.warningIcon:SetAlpha(1)
+        PI.frame.warningIcon:Show()
         PI.frame:SetScript("OnUpdate", FlashOnUpdate)
-    elseif not hasWarning and PI.frame.warningIconTop:IsShown() then
-        PI.frame.warningIconTop:Hide()
+    elseif not hasWarning and PI.frame.warningIcon:IsShown() then
+        PI.frame.warningIcon:Hide()
         PI.frame:SetScript("OnUpdate", nil)
     end
 end

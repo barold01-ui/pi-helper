@@ -2,6 +2,16 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.6]
+
+- warnings on the assignment panel now name the players involved, e.g.
+  "Bob and Alice are not in the raid!" instead of "One or more PI targets are
+  not in the raid!". Same for different zone, healer/tank, and duplicate
+  targets
+- the flashing warning icon now sits inside the panel, to the left of the
+  warnings, instead of floating above it
+- fixed the panel staying taller at the bottom after warnings cleared
+
 ## [2.0.5]
 
 - fixed the !pi chat reply failing in raids with several assignments: the
