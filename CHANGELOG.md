@@ -2,6 +2,12 @@
 
 All notable changes to Power Infusion Assignment Helper will be documented in this file.
 
+## [2.0.5]
+
+- fixed the !pi chat reply failing in raids with several assignments: the
+  separator between entries was a "|", which WoW treats as an escape code and
+  rejects the whole message. Entries are now separated by commas
+
 ## [2.0.4]
 
 - updated for game version 12.1.5 (interface 120105)

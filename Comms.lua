@@ -108,9 +108,11 @@ function PI:ReportAssignmentsToChat(zone)
 
     -- Pack several assignments per line. One message per priest is an easy
     -- way to hit the chat throttle (and get disconnected) in a full raid.
+    -- Never put a bare "|" in a chat line: it's WoW's escape character and
+    -- SendChatMessage rejects the whole message as an invalid escape code.
     local line = nil
     for i = 1, #reuseReport do
-        local candidate = line and (line.." | "..reuseReport[i]) or ("[PI] "..reuseReport[i])
+        local candidate = line and (line..", "..reuseReport[i]) or ("[PI] "..reuseReport[i])
         if #candidate > 240 then
             SendChatMessage(line, chatType)
             line = "[PI] "..reuseReport[i]
